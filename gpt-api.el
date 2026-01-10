@@ -119,17 +119,13 @@ Appends streaming output to the buffer."
     ;; Validate API key
     (gpt-validate-api-key)
     ;; Ensure we have a valid backend (not just non-nil, but correct type)
-    (unless (gpt--backend-valid-p gpt-backend gpt-api-type)
-      (setq gpt-backend (gpt-get-backend gpt-api-type)))
-    (unless gpt-backend
-      (user-error "Failed to create backend for %s" gpt-api-type))
-    ;; Parse messages from buffer
-    (let* ((messages (gpt-parse-buffer-messages buffer))
+    (let* ((api-type (gpt--current-api-type))
+           (messages (gpt-parse-buffer-messages buffer))
            (options (list :model gpt-model
                           :max-tokens (string-to-number gpt-max-tokens)
                           :temperature (string-to-number gpt-temperature)))
            ;; Add provider-specific options
-           (options (if (eq gpt-api-type 'anthropic)
+           (options (if (eq api-type 'anthropic)
                         (plist-put
                          (plist-put
                           (plist-put
@@ -138,19 +134,24 @@ Appends streaming output to the buffer."
                           :interleaved-thinking gpt-interleaved-thinking)
                          :web-search gpt-web-search)
                       options))
-           (options (if (eq gpt-api-type 'openai)
+           (options (if (eq api-type 'openai)
                         (plist-put
                          (plist-put options :reasoning-effort gpt-openai-reasoning-effort)
                          :reasoning-summary gpt-openai-reasoning-summary)
                       options))
            ;; Build request
-           (request-data (gpt-backend-stream-request-data gpt-backend messages options))
+           (request-data (gpt-backend-stream-request-data
+                          (or gpt-backend
+                              (setq gpt-backend (gpt-get-backend api-type)))
+                          messages options))
            (headers (gpt-backend-headers gpt-backend))
-           (url (if (eq gpt-api-type 'google)
+           (url (if (eq api-type 'google)
                     (progn
                       (require 'gpt-google)
                       (gpt-google--build-url gpt-backend gpt-model t))
                   (oref gpt-backend url))))
+      (unless gpt-backend
+        (user-error "Failed to create backend for %s" api-type))
       ;; Move to end of buffer for output
       (goto-char (point-max))
       (setq gpt--in-thinking-block nil)

@@ -658,7 +658,7 @@
 (ert-deftest gpt-test-update-backend ()
   "Test that gpt-update-backend clears cache and recreates."
   (let ((gpt-openai-key "initial-key")
-        (gpt-api-type 'openai)
+        (gpt-model "gpt-5.2")  ; OpenAI model
         (gpt-backends nil)
         (gpt-backend nil))
     ;; Create initial backend
@@ -672,19 +672,19 @@
 
 (ert-deftest gpt-test-validate-api-key-missing ()
   "Test API key validation with missing key."
-  (let ((gpt-api-type 'openai)
+  (let ((gpt-model "gpt-5.2")  ; OpenAI model
         (gpt-openai-key nil))
     (should-error (gpt-validate-api-key) :type 'user-error)))
 
 (ert-deftest gpt-test-validate-api-key-empty ()
   "Test API key validation with empty key."
-  (let ((gpt-api-type 'anthropic)
+  (let ((gpt-model "claude-opus-4-5")  ; Anthropic model
         (gpt-anthropic-key ""))
     (should-error (gpt-validate-api-key) :type 'user-error)))
 
 (ert-deftest gpt-test-validate-api-key-set ()
   "Test API key validation with valid key."
-  (let ((gpt-api-type 'google)
+  (let ((gpt-model "gemini-3-pro-preview")  ; Google model
         (gpt-google-key "valid-key"))
     ;; Should not error
     (gpt-validate-api-key)))

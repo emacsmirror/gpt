@@ -83,30 +83,12 @@ Validates cached backends to ensure they are the correct type."
 (defun gpt-update-backend ()
   "Update or recreate the current backend based on settings.
 Call this after changing API keys or backend settings."
-  (let ((provider gpt-api-type))
+  (let ((provider (gpt--current-api-type)))
     ;; Remove cached backend so it gets recreated
     (setf (alist-get provider gpt-backends) nil)
     (setq gpt-backend (gpt-get-backend provider))))
 
 ;;; Model definitions
-
-(defvar gpt-api-type 'anthropic
-  "Internal variable tracking current API provider (openai, anthropic, or google).
-
-This value is automatically derived from `gpt-model' and should NOT be
-set directly by users.  To change the API provider, use `gpt-switch-model'
-or set `gpt-model' to a model ID from `gpt-available-models'.")
-
-(defun gpt--api-type-watcher (_symbol newval operation _where)
-  "Warn users if they try to set `gpt-api-type' manually.
-NEWVAL is the new value and OPERATION is the kind of change."
-  (when (and (eq operation 'set)
-             (not (eq newval (gpt--get-model-api gpt-model))))
-    (lwarn 'gpt :warning
-           "Setting `gpt-api-type' directly is deprecated. \
-Use `gpt-switch-model' or set `gpt-model' instead.")))
-
-(add-variable-watcher 'gpt-api-type #'gpt--api-type-watcher)
 
 (defcustom gpt-available-models
   '(("GPT-5.2" . (:api openai :id "gpt-5.2" :max-tokens "400000"))
@@ -142,6 +124,11 @@ Model names must match keys in `gpt-available-models'."
            when (equal (plist-get plist :id) model-id)
            return (plist-get plist :api)))
 
+(defun gpt--current-api-type ()
+  "Return the API provider for the current `gpt-model'."
+  (or (gpt--get-model-api gpt-model)
+      'anthropic))
+
 ;;; Thinking budget (must be defined before gpt-model due to initialization order)
 
 (defcustom gpt-thinking-budget-fraction 3
@@ -157,7 +144,7 @@ Automatically set based on `gpt-thinking-budget-fraction'.")
 ;;; Settings
 
 (defun gpt-update-model-settings ()
-  "Update max_tokens, thinking_budget, and api_type based on the current model."
+  "Update max_tokens and thinking_budget based on the current model."
   (let* ((max-tokens (or (gpt--model-max-tokens gpt-model) "64000"))
          (max-tokens-num (string-to-number max-tokens))
          (thinking-budget-num (/ max-tokens-num gpt-thinking-budget-fraction))
@@ -165,10 +152,8 @@ Automatically set based on `gpt-thinking-budget-fraction'.")
          (api-type (gpt--get-model-api gpt-model)))
     (setq gpt-max-tokens max-tokens)
     (setq gpt-thinking-budget thinking-budget)
-    (when api-type
-      (setq gpt-api-type api-type))
     ;; Update backend for new API type (only after init complete)
-    (when (featurep 'gpt-core)
+    (when (and api-type (featurep 'gpt-core))
       (setq gpt-backend (gpt-get-backend api-type)))))
 
 (defun gpt--set-model (symbol value)
@@ -276,17 +261,19 @@ NEWVAL is the new value and OPERATION is the kind of change (set/let)."
 ;;; Validation
 
 (defun gpt-validate-api-key ()
-  "Check that the API key for the current `gpt-api-type' is configured."
-  (let ((api-key (cond ((eq gpt-api-type 'openai) gpt-openai-key)
-                       ((eq gpt-api-type 'anthropic) gpt-anthropic-key)
-                       ((eq gpt-api-type 'google) gpt-google-key)
-                       (t nil)))
-        (key-var (cond ((eq gpt-api-type 'openai) "gpt-openai-key")
-                       ((eq gpt-api-type 'anthropic) "gpt-anthropic-key")
-                       ((eq gpt-api-type 'google) "gpt-google-key"))))
+  "Check that the API key for the current model is configured."
+  (let* ((api-type (gpt--current-api-type))
+         (api-key (pcase api-type
+                    ('openai gpt-openai-key)
+                    ('anthropic gpt-anthropic-key)
+                    ('google gpt-google-key)))
+         (key-var (pcase api-type
+                    ('openai "gpt-openai-key")
+                    ('anthropic "gpt-anthropic-key")
+                    ('google "gpt-google-key"))))
     (when (or (null api-key) (string-empty-p api-key))
       (user-error "API key for %s is not set. Please configure `%s'"
-                  (symbol-name gpt-api-type) key-var))))
+                  (symbol-name api-type) key-var))))
 
 ;;; History functions
 

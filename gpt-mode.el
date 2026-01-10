@@ -163,10 +163,11 @@ then specific delimiter lines override the content face.")
 (defun gpt-switch-model ()
   "Switch between OpenAI, Anthropic, and Google models."
   (interactive)
-  (let* ((current-model-name (gpt--find-model-name gpt-api-type gpt-model))
+  (let* ((api-type (gpt--current-api-type))
+         (current-model-name (gpt--find-model-name api-type gpt-model))
          (prompt (format "Choose model (current: %s): "
                          (or current-model-name
-                             (format "%s/%s" gpt-api-type gpt-model))))
+                             (format "%s/%s" api-type gpt-model))))
          (choice (completing-read prompt
                                   (mapcar #'car gpt-available-models)
                                   nil t nil nil current-model-name))
@@ -175,9 +176,9 @@ then specific delimiter lines override the content face.")
         (progn
           ;; Only set model ID - gpt-update-model-settings automatically syncs API type
           (setq gpt-model (plist-get model-info :id))
-          (gpt-update-model-settings)  ; Update max_tokens, thinking_budget, and api_type
+          (gpt-update-model-settings)  ; Update max_tokens and thinking_budget
           (message "Switched to %s model: %s (max_tokens=%s, thinking_budget=%s)"
-                   (symbol-name gpt-api-type) gpt-model
+                   (symbol-name (gpt--current-api-type)) gpt-model
                    gpt-max-tokens gpt-thinking-budget))
       (message "Model selection cancelled."))))
 
@@ -213,14 +214,15 @@ then specific delimiter lines override the content face.")
       ;; Use a simple non-streaming request for title generation
       (require 'gpt-http)
       (require 'gpt-backend)
-      (let* ((messages (gpt-backend--parse-messages prompt-text))
-             (backend (gpt-get-backend gpt-api-type))
+      (let* ((api-type (gpt--current-api-type))
+             (messages (gpt-backend--parse-messages prompt-text))
+             (backend (gpt-get-backend api-type))
              (options (list :model gpt-model
                             :max-tokens 100
                             :temperature 0))
              (request-data (gpt-backend-request-data backend messages options))
              (headers (gpt-backend-headers backend))
-             (url (if (eq gpt-api-type 'google)
+             (url (if (eq api-type 'google)
                       (progn
                         (require 'gpt-google)
                         (gpt-google--build-url backend gpt-model nil))

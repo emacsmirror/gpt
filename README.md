@@ -83,8 +83,6 @@ Optionally, customize the model parameters:
 
 ```elisp
 (setq gpt-model "claude-opus-4-5")  ; Default model (auto-updates token budget)
-(setq gpt-max-tokens "64000")  ; Automatically set based on model
-(setq gpt-temperature "0")
 ```
 
 ### Available Models
@@ -108,7 +106,7 @@ gpt.el supports the latest models from all providers. The built-in models are de
 
 You can switch models interactively with `M-x gpt-switch-model` or `C-c C-m` in gpt-mode buffers.
 
-**The API provider is automatically selected based on the model** - you don't need to set it manually. Simply choose your model and gpt.el handles the rest:
+Simply choose your model and gpt.el handles the rest:
 
 ```elisp
 ;; Set default model - API provider auto-selected
