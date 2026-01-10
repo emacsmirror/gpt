@@ -2,6 +2,10 @@
 name = "gpt-el"
 version = "2.0"
 readme = "README.md"
+# Python 3.11+ required for:
+# - Modern type hint syntax (e.g., list[str], str | None without __future__ imports)
+# - ExceptionGroup and improved error messages
+# - TOML support in stdlib (for pyproject.toml parsing in dependencies)
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.52.0",

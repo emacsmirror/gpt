@@ -445,13 +445,22 @@ The plist contains :api, :id, and :max-tokens keys."
 ;;;###autoload
 (defun gpt-chat-multi-models (&optional context-mode prompt-for-models)
   "Run GPT command against multiple models in parallel.
+
 CONTEXT-MODE can be one of:
 - \\='all-buffers: Use all visible buffers as context
 - \\='current-buffer: Use current buffer as context
 - nil or \\='none: Use no buffer context
 
 By default, uses `gpt-multi-models-default' without prompting.
-With a prefix argument (C-u), prompts to choose models interactively."
+With a prefix argument (C-u), prompts to choose models interactively.
+
+Example usage:
+  M-x gpt-chat-multi-models RET current-buffer RET
+  C-u M-x gpt-chat-multi-models    ; Interactive model selection
+  (gpt-chat-multi-models \\='current-buffer)  ; From Lisp
+
+The command will create separate output buffers for each model,
+allowing you to compare responses side-by-side."
   (interactive (let ((choice (completing-read "Context mode: "
                                              '("all-buffers" "current-buffer" "none")
                                              nil t)))

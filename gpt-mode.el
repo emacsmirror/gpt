@@ -372,10 +372,21 @@ integrates with markdown-mode if available."
 (defvar gpt--spinner-frames ["◐" "◓" "◑" "◒"]
   "Unicode frames used for the GPT mode-line spinner.")
 
-(defvar-local gpt--spinner-timer nil)
-(defvar-local gpt--spinner-index 0)
-(defvar-local gpt--spinner-string "")
-(defvar-local gpt--spinner-active nil)
+(defvar-local gpt--spinner-timer nil
+  "Timer object for updating the mode-line spinner animation.
+Set to nil when spinner is inactive or when timer is cancelled.")
+
+(defvar-local gpt--spinner-index 0
+  "Current frame index in the spinner animation sequence.
+Cycles through indices 0 to (length gpt--spinner-frames) - 1.")
+
+(defvar-local gpt--spinner-string ""
+  "Current spinner character string displayed in the mode line.
+Updated by the spinner timer to create animation effect.")
+
+(defvar-local gpt--spinner-active nil
+  "Non-nil when the spinner is actively animating in the mode line.
+Set by `gpt--start-spinner' and cleared by `gpt--stop-spinner'.")
 
 (defun gpt--spinner-mode-line ()
   "Return the spinner string for the mode line."

@@ -42,6 +42,22 @@ def parse_messages(prompt: str, supported_roles: set[str] | None = None) -> list
 
     Returns:
         List of Message objects parsed from the prompt
+
+    Conversation Format:
+        The parser recognizes role-prefixed messages in the format "Role: content".
+        By default, these roles are supported (case-insensitive):
+        - User: or Human: for user messages
+        - Assistant: or Model: for assistant/model messages
+
+        Example:
+            User: What is 2+2?
+
+            Assistant: 2+2 equals 4.
+
+            User: Can you explain why?
+
+        The parser is flexible with role names - "User:" and "Human:" are
+        treated identically, as are "Assistant:" and "Model:".
     """
     if supported_roles is None:
         supported_roles = {"user", "assistant", "human", "model"}
