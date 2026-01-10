@@ -23,12 +23,27 @@
   :group 'external
   :prefix "gpt-")
 
-(defcustom gpt-api-type 'anthropic
-  "The type of API to use.  Either \\='openai, \\='anthropic, or \\='google."
-  :type '(choice (const :tag "OpenAI" openai)
-                 (const :tag "Anthropic" anthropic)
-                 (const :tag "Google" google))
-  :group 'gpt)
+(defvar gpt-api-type 'anthropic
+  "Internal variable tracking current API provider (openai, anthropic, or google).
+
+This value is automatically derived from `gpt-model' and should NOT be
+set directly by users.  To change the API provider, use `gpt-switch-model'
+or set `gpt-model' to a model ID from `gpt-available-models'.
+
+Example:
+  (setq gpt-model \"gpt-5.2\")           ; Automatically sets api-type to openai
+  (setq gpt-model \"claude-opus-4-5\")   ; Automatically sets api-type to anthropic")
+
+(defun gpt--api-type-watcher (_symbol newval operation _where)
+  "Warn users if they try to set `gpt-api-type' manually.
+NEWVAL is the new value and OPERATION is the kind of change."
+  (when (and (eq operation 'set)
+             ;; Only warn for manual sets, not our internal updates
+             (not (eq newval (gpt--get-model-api gpt-model))))
+    (lwarn 'gpt :warning
+           "Setting `gpt-api-type' directly is deprecated. \
+Use `gpt-switch-model' or set `gpt-model' instead. \
+The API provider is now automatically derived from the model.")))
 
 (defcustom gpt-available-models
   '(("GPT-5.2" . (:api openai :id "gpt-5.2" :max-tokens "400000"))
@@ -62,14 +77,29 @@ Model names must match keys in `gpt-available-models'."
            when (equal (plist-get plist :id) model-id)
            return (plist-get plist :max-tokens)))
 
+(defun gpt--get-model-api (model-id)
+  "Return API provider for MODEL-ID from `gpt-available-models', or nil."
+  (cl-loop for (_name . plist) in gpt-available-models
+           when (equal (plist-get plist :id) model-id)
+           return (plist-get plist :api)))
+
+;; Install watcher to warn users about deprecated manual gpt-api-type setting
+(add-variable-watcher 'gpt-api-type #'gpt--api-type-watcher)
+
 (defun gpt-update-model-settings ()
-  "Update max_tokens and thinking_budget based on the current model."
+  "Update max_tokens, thinking_budget, and api_type based on the current model.
+Automatically derives the API provider from the model definition to keep
+`gpt-api-type' in sync with `gpt-model'."
   (let* ((max-tokens (or (gpt--model-max-tokens gpt-model) "64000"))  ; Default if model not found
          (max-tokens-num (string-to-number max-tokens))
          (thinking-budget-num (/ max-tokens-num gpt-thinking-budget-fraction))
-         (thinking-budget (number-to-string thinking-budget-num)))
+         (thinking-budget (number-to-string thinking-budget-num))
+         (api-type (gpt--get-model-api gpt-model)))
     (setq gpt-max-tokens max-tokens)
     (setq gpt-thinking-budget thinking-budget)
+    ;; Automatically sync API type with model to eliminate manual synchronization
+    (when api-type
+      (setq gpt-api-type api-type))
     ;; Avoid noisy messages during package load; keep variables in sync silently.
     ))
 

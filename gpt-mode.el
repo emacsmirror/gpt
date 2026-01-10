@@ -172,9 +172,9 @@ then specific delimiter lines override the content face.")
          (model-info (cdr (assoc choice gpt-available-models))))
     (if model-info
         (progn
-          (setq gpt-api-type (plist-get model-info :api)
-                gpt-model (plist-get model-info :id))
-          (gpt-update-model-settings)  ; Update max_tokens and thinking_budget
+          ;; Only set model ID - gpt-update-model-settings automatically syncs API type
+          (setq gpt-model (plist-get model-info :id))
+          (gpt-update-model-settings)  ; Update max_tokens, thinking_budget, and api_type
           (message "Switched to %s model: %s (max_tokens=%s, thinking_budget=%s)"
                    (symbol-name gpt-api-type) gpt-model
                    gpt-max-tokens gpt-thinking-budget))
@@ -290,11 +290,6 @@ Useful for quickly processing text copied from other applications."
     map)
   "Keymap for GPT mode.")
 
-(defun gpt--enable-word-wrap ()
-  "Ensure GPT buffers wrap long lines by default."
-  (setq-local truncate-lines nil)
-  (setq-local word-wrap t))
-
 (define-derived-mode gpt-mode text-mode "GPT"
   "A mode for displaying the output of GPT commands.
 This mode provides syntax highlighting for GPT conversations and
@@ -308,7 +303,10 @@ integrates with markdown-mode if available."
       (gpt--setup-markdown-features)
     (gpt--setup-basic-features))
 
-  (gpt--enable-word-wrap)
+  ;; Configure word wrapping based on user preference
+  (when gpt-enable-word-wrap
+    (setq-local truncate-lines nil)
+    (setq-local word-wrap t))
   (add-to-invisibility-spec 'gpt-prefix)
   ;; Use the keymap we defined earlier
   (use-local-map gpt-mode-map)
@@ -367,6 +365,13 @@ integrates with markdown-mode if available."
 (defcustom gpt-mode-line-spinner-interval 0.1
   "Interval (seconds) between spinner frame updates."
   :type 'number
+  :group 'gpt)
+
+(defcustom gpt-enable-word-wrap t
+  "Whether to enable word wrapping in GPT buffers.
+When non-nil, long lines are wrapped at word boundaries.
+When nil, long lines are truncated (not wrapped)."
+  :type 'boolean
   :group 'gpt)
 
 (defvar gpt--spinner-frames ["◐" "◓" "◑" "◒"]

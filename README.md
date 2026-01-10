@@ -145,20 +145,16 @@ gpt.el supports the latest models from all providers. The built-in models are de
 
 You can switch models interactively with `M-x gpt-switch-model` or `C-c C-m` in gpt-mode buffers.
 
-To add custom models, customize `gpt-available-models`. Each entry contains the API type, model ID, and max output tokens.
-
-To switch API providers:
+**The API provider is automatically selected based on the model** - you don't need to set it manually. Simply choose your model and gpt.el handles the rest:
 
 ```elisp
-;; For Anthropic (default)
-(setq gpt-api-type 'anthropic)
-
-;; For OpenAI
-(setq gpt-api-type 'openai)
-
-;; For Google Gemini
-(setq gpt-api-type 'google)
+;; Set default model - API provider auto-selected
+(setq gpt-model "claude-opus-4-5")  ; Uses Anthropic
+(setq gpt-model "gpt-5.2")          ; Uses OpenAI
+(setq gpt-model "gemini-3-pro-preview")  ; Uses Google
 ```
+
+To add custom models, customize `gpt-available-models`. Each entry contains the API type, model ID, and max output tokens.
 
 ## Usage
 
