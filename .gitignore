@@ -1,12 +1,13 @@
+# API documentation files
 anthropic-api-docs.txt
 openai-o1-api-docs.txt
+
+# Local project instructions
 CLAUDE.md
+
+# Generated files
 repomix*
-.venv*
-.mypy*
+
+# Emacs
 *.elc
-*.cpython*
 .emacs-packages/
-__pycache__/
-.pytest_cache/
-.ruff_cache/

@@ -96,7 +96,6 @@ gpt.el supports the latest models from all providers. The built-in models are de
 - `gpt-5.2` - GPT-5.2 (400k max tokens)
 - `gpt-5.1` - GPT-5.1 (400k max tokens)
 - `gpt-5-mini` - GPT-5 Mini (200k max tokens)
-- `gpt-5-nano` - GPT-5 Nano (100k max tokens)
 
 **Anthropic:**
 
