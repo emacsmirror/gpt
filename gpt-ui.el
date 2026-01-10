@@ -26,8 +26,11 @@
 (defvar gpt-buffer-counter 0
   "Counter to ensure unique buffer names for GPT output buffers.")
 
-(defvar gpt-buffer-name-length 60
-  "Maximum character length of the GPT buffer name title.")
+(defcustom gpt-buffer-name-length 60
+  "Maximum character length of the GPT buffer name title.
+Buffer names are truncated to this length with '...' appended if needed."
+  :type 'integer
+  :group 'gpt)
 
 (defun gpt-read-command (context-mode use-selection)
   "Read a GPT command from the user with history and completion.
@@ -83,14 +86,14 @@ If INCLUDE-METADATA is non-nil, prepend a header with buffer name and file path.
   (let ((name (string-remove-suffix "-mode" (symbol-name mode))))
     (if (string-empty-p name) "text" name)))
 
-(defun gpt--extract-code-block (text)
+(defun gpt--edit-extract-code-block (text)
   "Extract and return first fenced code block body from TEXT.
 If no code fence is found, return TEXT trimmed."
   (if (string-match "```[^\n]*\n\\([\\s\\S]*?\\)```" text)
       (match-string 1 text)
     (string-trim text)))
 
-(defun gpt--remove-thinking-blocks (text)
+(defun gpt--edit-remove-thinking-blocks (text)
   "Strip [Thinking...] sections and related markers from TEXT."
   (let ((case-fold-search nil)
         (pattern "\\[Thinking\\.\\.\\.\\]\\(?:.\\|\n\\)*?\\[Thinking done\\.\\]"))
@@ -101,7 +104,7 @@ If no code fence is found, return TEXT trimmed."
     (setq text (replace-regexp-in-string "\\s-*\\[Thinking done\\.\\]\\s-*" "" text))
     text))
 
-(defun gpt--sanitize-utf8 (text)
+(defun gpt--edit-sanitize-utf8 (text)
   "Remove characters from TEXT that cannot be safely encoded as UTF-8."
   (apply #'string
          (cl-loop for ch across text
@@ -112,12 +115,12 @@ If no code fence is found, return TEXT trimmed."
 
 (defun gpt--clean-edit-output (text)
   "Normalize GPT edit output TEXT by removing meta markers."
-  (let* ((without-thinking (gpt--remove-thinking-blocks text))
+  (let* ((without-thinking (gpt--edit-remove-thinking-blocks text))
          (stripped (string-trim without-thinking)))
     (setq stripped (replace-regexp-in-string "^Assistant:\\s-*" "" stripped))
-    (gpt--sanitize-utf8 stripped)))
+    (gpt--edit-sanitize-utf8 stripped)))
 
-(defun gpt--strip-code-fences (text)
+(defun gpt--edit-strip-code-fences (text)
   "Remove leading and trailing Markdown code fences from TEXT."
   (let ((clean text))
     (when (string-match "\\`[ \t]*```[^\n]*\n" clean)
@@ -129,6 +132,80 @@ If no code fence is found, return TEXT trimmed."
       (setq clean (substring clean 0 (match-beginning 0)))))
     clean))
 
+(defun gpt--edit-generate-diff (original-text new-content)
+  "Generate diff between ORIGINAL-TEXT and NEW-CONTENT.
+Returns a plist with :exit-code and :diff-buffer keys.
+Exit code is 0 if no changes, 1 if changes exist, or error code on failure."
+  (let* ((temp-original (make-temp-file "gpt-edit-original-"))
+         (temp-new (make-temp-file "gpt-edit-new-"))
+         (diff-program (or (executable-find "diff")
+                           (user-error "GPT edit requires the external `diff` program, but it was not found in PATH")))
+         (diff-buffer (get-buffer-create "*gpt-edit-diff*"))
+         diff-exit)
+    (unwind-protect
+        (progn
+          (with-temp-file temp-original
+            (insert original-text))
+          (with-temp-file temp-new
+            (insert new-content))
+          (condition-case err
+              (with-current-buffer diff-buffer
+                (let ((inhibit-read-only t))
+                  (erase-buffer)
+                  (setq diff-exit
+                        (call-process diff-program nil (current-buffer) nil "-u" temp-original temp-new))
+                  (unless (memq diff-exit '(0 1))
+                    (error "diff exited with status %s" diff-exit))
+                  (when (= diff-exit 1)
+                    (diff-mode)
+                    (goto-char (point-min)))))
+            (error
+             (message "GPT edit failed while diffing: %s" (error-message-string err))
+             (signal (car err) (cdr err))))
+          (list :exit-code diff-exit :diff-buffer diff-buffer))
+      (delete-file temp-original)
+      (delete-file temp-new))))
+
+(defun gpt--edit-apply-changes (source-buffer new-content)
+  "Apply NEW-CONTENT to SOURCE-BUFFER, preserving point position."
+  (with-current-buffer source-buffer
+    (let ((inhibit-read-only t)
+          (original-point (point)))
+      (erase-buffer)
+      (insert new-content)
+      (goto-char (min original-point (point-max))))))
+
+(defun gpt--edit-handle-choice (choice source-buffer prompt-buffer new-content
+                                       original-text base-command history window-config)
+  "Handle user CHOICE (y/n/f) for GPT edit.
+Returns t if the edit should be rerun with feedback."
+  (pcase choice
+    ((or ?y ?Y)
+     (when (buffer-live-p prompt-buffer)
+       (kill-buffer prompt-buffer))
+     (gpt--edit-apply-changes source-buffer new-content)
+     (when window-config
+       (set-window-configuration window-config))
+     (message "Applied GPT edit.")
+     nil)
+    ((or ?n ?N)
+     (when (buffer-live-p prompt-buffer)
+       (kill-buffer prompt-buffer))
+     (when window-config
+       (set-window-configuration window-config))
+     (message "Edit rejected.")
+     nil)
+    (_
+     (let* ((feedback (string-trim (read-string "Additional feedback (empty to retry): "))))
+       (when (buffer-live-p prompt-buffer)
+         (kill-buffer prompt-buffer))
+       (let ((updated-history (if (string-empty-p feedback)
+                                   history
+                                 (cons feedback history))))
+         (message "GPT edit: re-running with feedback...")
+         (gpt-edit--run source-buffer original-text base-command updated-history window-config))
+       t))))
+
 (defun gpt--finalize-edit (source-buffer prompt-buffer original-window original-text initial-size base-command history window-config)
   "Finalize GPT edit and optionally continue with feedback.
 SOURCE-BUFFER is the buffer being edited.
@@ -139,6 +216,7 @@ INITIAL-SIZE marks where GPT output begins.
 BASE-COMMAND is the initial instruction.
 HISTORY is a list of feedback strings from previous iterations.
 WINDOW-CONFIG is the window configuration to restore after editing."
+  ;; Restore original window and validate buffers
   (when (window-live-p original-window)
     (select-window original-window))
   (unless (buffer-live-p source-buffer)
@@ -147,6 +225,8 @@ WINDOW-CONFIG is the window configuration to restore after editing."
   (unless (buffer-live-p prompt-buffer)
     (message "GPT edit aborted: prompt buffer was killed.")
     (cl-return-from gpt--finalize-edit))
+
+  ;; Extract and clean GPT output
   (let ((raw-output (with-current-buffer prompt-buffer
                       (buffer-substring-no-properties initial-size (point-max)))))
     (setq raw-output (gpt--clean-edit-output raw-output))
@@ -156,13 +236,17 @@ WINDOW-CONFIG is the window configuration to restore after editing."
     (when (string-empty-p (string-trim raw-output))
       (message "GPT edit returned no content.")
       (cl-return-from gpt--finalize-edit))
-    (let* ((extracted (gpt--extract-code-block raw-output))
-           (new-content (string-trim (gpt--strip-code-fences extracted)))
+
+    ;; Process content and check for changes
+    (let* ((extracted (gpt--edit-extract-code-block raw-output))
+           (new-content (string-trim (gpt--edit-strip-code-fences extracted)))
            (reran nil))
-      ;; Preserve trailing newline if original had one and new content does not.
+      ;; Preserve trailing newline if original had one
       (when (and (string-suffix-p "\n" original-text)
                  (not (string-suffix-p "\n" new-content)))
         (setq new-content (concat new-content "\n")))
+
+      ;; Check if content actually changed
       (if (string= original-text new-content)
           (progn
             (message "GPT produced no changes.")
@@ -170,77 +254,32 @@ WINDOW-CONFIG is the window configuration to restore after editing."
               (kill-buffer prompt-buffer))
             (when window-config
               (set-window-configuration window-config)))
-        (let* ((temp-original (make-temp-file "gpt-edit-original-"))
-               (temp-new (make-temp-file "gpt-edit-new-"))
-               (diff-program (or (executable-find "diff")
-                                 (user-error "GPT edit requires the external `diff` program, but it was not found in PATH")))
-               (diff-buffer (get-buffer-create "*gpt-edit-diff*"))
-               diff-exit)
-          (unwind-protect
+
+        ;; Generate and display diff
+        (let* ((diff-result (gpt--edit-generate-diff original-text new-content))
+               (diff-exit (plist-get diff-result :exit-code))
+               (diff-buffer (plist-get diff-result :diff-buffer)))
+          (if (zerop diff-exit)
+              ;; No changes in diff
               (progn
-                (with-temp-file temp-original
-                  (insert original-text))
-                (with-temp-file temp-new
-                  (insert new-content))
-                (condition-case err
-                    (with-current-buffer diff-buffer
-                      (let ((inhibit-read-only t))
-                        (erase-buffer)
-                        (setq diff-exit
-                              (call-process diff-program nil (current-buffer) nil "-u" temp-original temp-new))
-                        (unless (memq diff-exit '(0 1))
-                          (error "diff exited with status %s" diff-exit))
-                        (when (= diff-exit 1)
-                          (diff-mode)
-                          (goto-char (point-min)))))
-                  (error
-                   (message "GPT edit failed while diffing: %s" (error-message-string err))
-                   (signal (car err) (cdr err))))
-                (if (zerop diff-exit)
-                    (progn
-                      (when (buffer-live-p diff-buffer)
-                        (kill-buffer diff-buffer))
-                      (when window-config
-                        (set-window-configuration window-config))
-                      (message "GPT edit: diff produced no changes."))
-                  (display-buffer diff-buffer)
-                  (message "GPT edit: review diff and confirm.")
-                  (let ((choice (read-char-choice
-                                 "Apply GPT edits, give feedback, or abort (y=yes, f=feedback, n=no)? "
-                                 '(?y ?Y ?n ?N ?f ?F))))
-                    (when (buffer-live-p diff-buffer)
-                      (kill-buffer diff-buffer))
-                    (pcase choice
-                      ((or ?y ?Y)
-                       (when (buffer-live-p prompt-buffer)
-                         (kill-buffer prompt-buffer))
-                       (with-current-buffer source-buffer
-                         (let ((inhibit-read-only t)
-                               (original-point (point)))
-                           (erase-buffer)
-                           (insert new-content)
-                           (goto-char (min original-point (point-max)))))
-                       (when window-config
-                         (set-window-configuration window-config))
-                       (message "Applied GPT edit."))
-                      ((or ?n ?N)
-                       (when (buffer-live-p prompt-buffer)
-                         (kill-buffer prompt-buffer))
-                       (when window-config
-                         (set-window-configuration window-config))
-                       (message "Edit rejected."))
-                      (_
-                       (let* ((feedback (string-trim (read-string "Additional feedback (empty to retry): "))))
-                         (setq reran t)
-                         (when (buffer-live-p prompt-buffer)
-                           (kill-buffer prompt-buffer))
-                         (let ((updated-history (if (string-empty-p feedback)
-                                                     history
-                                                   (cons feedback history))))
-                           (message "GPT edit: re-running with feedback...")
-                           (gpt-edit--run source-buffer original-text base-command updated-history window-config))))))))
-            (delete-file temp-original)
-            (delete-file temp-new)))
+                (when (buffer-live-p diff-buffer)
+                  (kill-buffer diff-buffer))
+                (when window-config
+                  (set-window-configuration window-config))
+                (message "GPT edit: diff produced no changes."))
+
+            ;; Display diff and prompt for user action
+            (display-buffer diff-buffer)
+            (message "GPT edit: review diff and confirm.")
+            (let ((choice (read-char-choice
+                           "Apply GPT edits, give feedback, or abort (y=yes, f=feedback, n=no)? "
+                           '(?y ?Y ?n ?N ?f ?F))))
+              (when (buffer-live-p diff-buffer)
+                (kill-buffer diff-buffer))
+              (setq reran (gpt--edit-handle-choice choice source-buffer prompt-buffer new-content
+                                                   original-text base-command history window-config)))))
+
+        ;; Clean up prompt buffer if we didn't rerun
         (unless reran
           (when (buffer-live-p prompt-buffer)
             (kill-buffer prompt-buffer)))))))
@@ -439,7 +478,8 @@ With a prefix argument (C-u), prompts to choose models interactively."
           (let* ((api-type (plist-get info :api))
                  (model-id (plist-get info :id))
                  (model-max-tokens (or (plist-get info :max-tokens) "64000"))
-                 (model-thinking-budget (number-to-string (/ (string-to-number model-max-tokens) 3)))
+                 (model-thinking-budget (number-to-string (/ (string-to-number model-max-tokens)
+                                                             gpt-thinking-budget-fraction)))
                  ;; Dynamically bind per-run model and settings
                  (gpt-api-type api-type)
                  (gpt-model model-id)

@@ -66,7 +66,7 @@ Model names must match keys in `gpt-available-models'."
   "Update max_tokens and thinking_budget based on the current model."
   (let* ((max-tokens (or (gpt--model-max-tokens gpt-model) "64000"))  ; Default if model not found
          (max-tokens-num (string-to-number max-tokens))
-         (thinking-budget-num (/ max-tokens-num 3))  ; 1/3 of max tokens
+         (thinking-budget-num (/ max-tokens-num gpt-thinking-budget-fraction))
          (thinking-budget (number-to-string thinking-budget-num)))
     (setq gpt-max-tokens max-tokens)
     (setq gpt-thinking-budget thinking-budget)
@@ -175,9 +175,16 @@ Use nil, auto, concise, or detailed."
                  (const "detailed"))
   :group 'gpt)
 
+(defcustom gpt-thinking-budget-fraction 3
+  "Fraction of max_tokens to allocate for thinking budget.
+The thinking budget is calculated as (max_tokens / gpt-thinking-budget-fraction).
+Default value of 3 means thinking gets 1/3 of max tokens."
+  :type 'integer
+  :group 'gpt)
+
 (defvar gpt-thinking-budget "21333"
   "Token budget for extended thinking mode.
-Automatically set to 1/3 of max tokens.")
+Automatically set based on `gpt-thinking-budget-fraction'.")
 
 (defcustom gpt-python-path
   (let* ((script-dir (when (or load-file-name buffer-file-name)

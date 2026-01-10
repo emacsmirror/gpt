@@ -20,8 +20,11 @@
 (declare-function gpt--stop-spinner "gpt-mode" nil)
 
 (defun gpt-create-prompt-file (buffer)
-  "Create a temporary file containing the prompt from BUFFER."
+  "Create a temporary file containing the prompt from BUFFER.
+Sets restrictive permissions (owner read/write only) to protect sensitive data."
   (let ((temp-file (make-temp-file "gpt-prompt-")))
+    ;; Set restrictive permissions to protect potentially sensitive prompt content
+    (set-file-modes temp-file #o600)
     (with-current-buffer buffer
       (write-region (point-min) (point-max) temp-file))
     temp-file))
@@ -114,12 +117,20 @@
       (file-error
        (when (buffer-live-p stderr-buffer)
          (kill-buffer stderr-buffer))
-       (gpt-message "Failed to start process (file error): %s" (error-message-string err))
+       (gpt-message "Failed to start process (file error): %s\nPython path: %s\nScript path: %s\nCommand: %s"
+                    (error-message-string err)
+                    gpt-python-path
+                    gpt-script-path
+                    (mapconcat #'identity cmd-args " "))
        nil)
       (error
        (when (buffer-live-p stderr-buffer)
          (kill-buffer stderr-buffer))
-       (gpt-message "Failed to start process: %s" (error-message-string err))
+       (gpt-message "Failed to start process: %s\nPython path: %s\nScript path: %s\nCommand: %s"
+                    (error-message-string err)
+                    gpt-python-path
+                    gpt-script-path
+                    (mapconcat #'identity cmd-args " "))
        nil))))
 
 (defun gpt-start-timer (process)
