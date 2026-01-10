@@ -167,13 +167,18 @@ Exit code is 0 if no changes, 1 if changes exist, or error code on failure."
       (delete-file temp-new))))
 
 (defun gpt--edit-apply-changes (source-buffer new-content)
-  "Apply NEW-CONTENT to SOURCE-BUFFER, preserving point position."
+  "Apply NEW-CONTENT to SOURCE-BUFFER, preserving point position.
+Creates an undo boundary so changes can be reverted with \\[undo]."
   (with-current-buffer source-buffer
     (let ((inhibit-read-only t)
           (original-point (point)))
+      ;; Create an undo boundary before making changes
+      (undo-boundary)
       (erase-buffer)
       (insert new-content)
-      (goto-char (min original-point (point-max))))))
+      (goto-char (min original-point (point-max)))
+      ;; Create an undo boundary after changes complete
+      (undo-boundary))))
 
 (defun gpt--edit-handle-choice (choice source-buffer prompt-buffer new-content
                                        original-text base-command history window-config)
