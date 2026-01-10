@@ -304,6 +304,55 @@ Ensure you have the required packages installed in the Python environment that g
 /path/to/your/python -c "import anthropic, openai, google.genai, jsonlines"
 ```
 
+### API Key Errors
+
+If you get errors about missing or invalid API keys:
+
+1. **Check key is set**: Verify that you've set at least one API key:
+   ```elisp
+   (setq gpt-openai-key "sk-...")     ; For OpenAI
+   (setq gpt-anthropic-key "sk-ant-api03-...")  ; For Anthropic
+   (setq gpt-google-key "AIzaSy...")  ; For Google
+   ```
+
+2. **Check key format**: API keys should be strings without quotes in the actual key value.
+
+3. **Restart Emacs**: After setting keys, restart Emacs to ensure they're loaded.
+
+4. **Test from Python**: Verify the key works with the provider's SDK:
+   ```bash
+   python3 -c "from anthropic import Anthropic; Anthropic(api_key='your-key').messages.create(...)"
+   ```
+
+### Process Hangs or Timeouts
+
+If GPT commands hang or don't complete:
+
+1. **Check process status**: Use `C-c C-k` in the GPT buffer to kill a hung process.
+
+2. **Check network**: Verify you can reach the API endpoints:
+   ```bash
+   curl -I https://api.openai.com/v1/models
+   curl -I https://api.anthropic.com/v1/messages
+   ```
+
+3. **Check Python script**: Test the backend directly:
+   ```bash
+   echo "your-api-key" | python3 gpt.py claude-opus-4-5 1000 0.0 anthropic /tmp/test-prompt.txt
+   ```
+
+4. **Enable debug output**: Check `*Messages*` buffer for error details.
+
+### Buffer-Specific Issues
+
+If GPT commands fail in certain buffers:
+
+1. **Check buffer-file-name**: Some commands require a file-backed buffer.
+
+2. **Check for read-only buffers**: GPT edit commands require writable buffers.
+
+3. **Large buffers**: Very large buffers may exceed token limits. Try selecting a region instead.
+
 ## License
 
 MIT License - see LICENSE.md for details.
