@@ -1,18 +1,19 @@
 ;;; gpt-mode.el --- Mode-specific functionality for gpt.el -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2022 Andreas Stuhlmueller
+;; Copyright (C) 2022-2025 Andreas Stuhlmueller
 
 ;; Author: Andreas Stuhlmueller <emacs@stuhlmueller.org>
-;; Version: 2.0
+;; Version: 3.0
 ;; Keywords: openai, anthropic, claude, language, copilot, convenience, tools
 ;; URL: https://github.com/stuhlmueller/gpt.el
 ;; License: MIT
 ;; SPDX-License-Identifier: MIT
-;; Package-Requires: ((emacs "25.1"))
+;; Package-Requires: ((emacs "28.1"))
 
 ;;; Commentary:
 
 ;; This file contains mode-specific functionality for gpt.el.
+;; This is the pure Elisp version - no Python dependencies.
 
 ;;; Code:
 
@@ -22,11 +23,11 @@
 (declare-function gpt-insert-command "gpt-ui" (command))
 (declare-function gpt-validate-api-key "gpt-core" nil)
 (declare-function gpt-run-buffer "gpt-api" (output-buffer))
-(declare-function gpt-message "gpt-api" (message))
+(declare-function gpt-message "gpt-api" (format-string &rest args))
 (declare-function gpt-update-model-settings "gpt-core" nil)
 (declare-function gpt-create-output-buffer "gpt-ui" (command))
 (declare-function gpt-read-command "gpt-ui" (context-mode use-selection))
-(declare-function gpt-create-prompt-file "gpt-api" (content))
+(declare-function gpt-abort-request "gpt-api" (&optional buffer))
 
 (defface gpt-input-face
   '((t (:inherit comint-highlight-prompt)))
@@ -204,34 +205,43 @@ then specific delimiter lines override the content face.")
   (gpt-validate-api-key)
   (let* ((gpt-buffer (current-buffer))
          (buffer-string (buffer-substring-no-properties (point-min) (point-max)))
-         (prompt (concat buffer-string "\n\nUser: Create a title with a maximum of 50 chars for the chat above. Say only the title, nothing else. No quotes.")))
-    (with-temp-buffer
-      (insert prompt)
-      (let ((prompt-file (gpt-create-prompt-file (current-buffer)))
-            (api-key (cond ((eq gpt-api-type 'openai) gpt-openai-key)
-                           ((eq gpt-api-type 'anthropic) gpt-anthropic-key)
-                           ((eq gpt-api-type 'google) gpt-google-key)
-                           (t "NOT SET")))
-            (api-type-str (symbol-name gpt-api-type))
-            (output-buffer (generate-new-buffer " *gpt-title-output*")))
-        (gpt-message "Asking GPT to generate buffer name...")
-        (unwind-protect
-            (progn
-              ;; Use call-process-region to pass API key via stdin (more secure)
-              (with-temp-buffer
-                (insert api-key "\n")
-                (call-process-region (point-min) (point-max)
-                                     gpt-python-path nil output-buffer nil
-                                     gpt-script-path gpt-model gpt-max-tokens
-                                     gpt-temperature api-type-str prompt-file))
-              (let ((generated-title (string-trim (with-current-buffer output-buffer
-                                                    (buffer-string)))))
-                (with-current-buffer gpt-buffer
-                  (rename-buffer (format "*GPT: %s*" generated-title)))))
-          (when (buffer-live-p output-buffer)
-            (kill-buffer output-buffer))
-          (when (file-exists-p prompt-file)
-            (delete-file prompt-file)))))))
+         (prompt-text (concat buffer-string "\n\nUser: Create a title with a maximum of 50 chars for the chat above. Say only the title, nothing else. No quotes.\n\nAssistant: "))
+         (temp-buffer (generate-new-buffer " *gpt-title*")))
+    (gpt-message "Asking GPT to generate buffer name...")
+    (with-current-buffer temp-buffer
+      (insert prompt-text)
+      ;; Use a simple non-streaming request for title generation
+      (require 'gpt-http)
+      (require 'gpt-backend)
+      (let* ((messages (gpt-backend--parse-messages prompt-text))
+             (backend (gpt-get-backend gpt-api-type))
+             (options (list :model gpt-model
+                            :max-tokens 100
+                            :temperature 0))
+             (request-data (gpt-backend-request-data backend messages options))
+             (headers (gpt-backend-headers backend))
+             (url (if (eq gpt-api-type 'google)
+                      (progn
+                        (require 'gpt-google)
+                        (gpt-google--build-url backend gpt-model nil))
+                    (oref backend url))))
+        (gpt-http--url-request
+         url headers request-data
+         (lambda (response _http-status error-msg)
+           (if error-msg
+               (progn
+                 (gpt-message "Failed to generate title: %s" error-msg)
+                 (when (buffer-live-p temp-buffer)
+                   (kill-buffer temp-buffer)))
+             (let ((content (gpt-backend-parse-response backend response)))
+               (when (buffer-live-p gpt-buffer)
+                 (with-current-buffer gpt-buffer
+                   (let ((title (if (stringp content)
+                                    (string-trim content)
+                                  (string-trim (plist-get content :content)))))
+                     (rename-buffer (format "*GPT: %s*" title)))))
+               (when (buffer-live-p temp-buffer)
+                 (kill-buffer temp-buffer))))))))))
 
 (defun gpt-chat-clipboard ()
   "Run a GPT command using the current clipboard/kill-ring content as context.
@@ -318,13 +328,7 @@ integrates with markdown-mode if available."
   (interactive)
   (unless (eq major-mode 'gpt-mode)
     (user-error "Not in a gpt output buffer"))
-  (let ((proc (get-buffer-process (current-buffer))))
-    (if (and proc (process-live-p proc))
-        (progn
-          (delete-process proc)
-          (when (fboundp 'gpt--stop-spinner) (gpt--stop-spinner))
-          (message "Killed GPT process"))
-      (message "No running GPT process"))))
+  (gpt-abort-request (current-buffer)))
 
 (declare-function markdown-mode "markdown-mode" nil)
 

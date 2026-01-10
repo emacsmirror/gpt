@@ -1,9 +1,9 @@
 ;;; gpt-core.el --- Core functionality for gpt.el -*- lexical-binding: t; package-lint-main-file: "gpt.el"; -*-
 
-;; Copyright (C) 2022 Andreas Stuhlmueller
+;; Copyright (C) 2022-2025 Andreas Stuhlmueller
 
 ;; Author: Andreas Stuhlmueller <emacs@stuhlmueller.org>
-;; Version: 2.0
+;; Version: 3.0
 ;; Keywords: openai, anthropic, claude, language, copilot, convenience, tools
 ;; URL: https://github.com/stuhlmueller/gpt.el
 ;; License: MIT
@@ -12,44 +12,106 @@
 ;;; Commentary:
 
 ;; This file contains core variables and basic utilities for gpt.el.
+;; This is the pure Elisp version - no Python dependencies.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'eieio)
+
+;;; Customization group
 
 (defgroup gpt nil
   "Interface to instruction-following language models."
   :group 'external
   :prefix "gpt-")
 
+;;; Backend management
+
+(defvar gpt-backend nil
+  "The current backend instance for API calls.
+This is an object of type `gpt-backend' or its subclasses.")
+
+(defvar gpt-backends nil
+  "Alist of available backends keyed by provider symbol.
+Each entry is (PROVIDER . BACKEND-INSTANCE).")
+
+(defun gpt--backend-valid-p (backend provider)
+  "Return t if BACKEND is a valid instance for PROVIDER."
+  (and backend
+       (cl-typep backend 'gpt-backend)
+       (pcase provider
+         ('openai (cl-typep backend 'gpt-openai-backend))
+         ('anthropic (cl-typep backend 'gpt-anthropic-backend))
+         ('google (cl-typep backend 'gpt-google-backend))
+         (_ nil))))
+
+(defun gpt-get-backend (provider)
+  "Get or create backend for PROVIDER symbol.
+Validates cached backends to ensure they are the correct type."
+  (let ((cached (alist-get provider gpt-backends)))
+    (if (gpt--backend-valid-p cached provider)
+        cached
+      ;; Invalid or missing - create fresh
+      (let ((backend (gpt--create-backend provider)))
+        (when backend
+          (setf (alist-get provider gpt-backends) backend))
+        backend))))
+
+(defun gpt--create-backend (provider)
+  "Create a new backend instance for PROVIDER."
+  (pcase provider
+    ('openai
+     (require 'gpt-openai)
+     (when gpt-openai-key
+       (gpt-openai-create gpt-openai-key)))
+    ('anthropic
+     (require 'gpt-anthropic)
+     (when gpt-anthropic-key
+       (gpt-anthropic-create
+        gpt-anthropic-key
+        :thinking-enabled gpt-thinking-enabled
+        :thinking-budget (string-to-number gpt-thinking-budget)
+        :interleaved-thinking gpt-interleaved-thinking
+        :web-search gpt-web-search)))
+    ('google
+     (require 'gpt-google)
+     (when gpt-google-key
+       (gpt-google-create gpt-google-key)))))
+
+(defun gpt-update-backend ()
+  "Update or recreate the current backend based on settings.
+Call this after changing API keys or backend settings."
+  (let ((provider gpt-api-type))
+    ;; Remove cached backend so it gets recreated
+    (setf (alist-get provider gpt-backends) nil)
+    (setq gpt-backend (gpt-get-backend provider))))
+
+;;; Model definitions
+
 (defvar gpt-api-type 'anthropic
   "Internal variable tracking current API provider (openai, anthropic, or google).
 
 This value is automatically derived from `gpt-model' and should NOT be
 set directly by users.  To change the API provider, use `gpt-switch-model'
-or set `gpt-model' to a model ID from `gpt-available-models'.
-
-Example:
-  (setq gpt-model \"gpt-5.2\")           ; Automatically sets api-type to openai
-  (setq gpt-model \"claude-opus-4-5\")   ; Automatically sets api-type to anthropic")
+or set `gpt-model' to a model ID from `gpt-available-models'.")
 
 (defun gpt--api-type-watcher (_symbol newval operation _where)
   "Warn users if they try to set `gpt-api-type' manually.
 NEWVAL is the new value and OPERATION is the kind of change."
   (when (and (eq operation 'set)
-             ;; Only warn for manual sets, not our internal updates
              (not (eq newval (gpt--get-model-api gpt-model))))
     (lwarn 'gpt :warning
            "Setting `gpt-api-type' directly is deprecated. \
-Use `gpt-switch-model' or set `gpt-model' instead. \
-The API provider is now automatically derived from the model.")))
+Use `gpt-switch-model' or set `gpt-model' instead.")))
+
+(add-variable-watcher 'gpt-api-type #'gpt--api-type-watcher)
 
 (defcustom gpt-available-models
   '(("GPT-5.2" . (:api openai :id "gpt-5.2" :max-tokens "400000"))
     ("GPT-5.1" . (:api openai :id "gpt-5.1" :max-tokens "400000"))
     ("GPT-5 Mini" . (:api openai :id "gpt-5-mini" :max-tokens "200000"))
-    ("GPT-5 Nano" . (:api openai :id "gpt-5-nano" :max-tokens "100000"))
     ("Claude 4.5 Opus" . (:api anthropic :id "claude-opus-4-5" :max-tokens "32000"))
     ("Claude 4.5 Sonnet" . (:api anthropic :id "claude-sonnet-4-5" :max-tokens "64000"))
     ("Gemini 3 Pro (Preview)" . (:api google :id "gemini-3-pro-preview" :max-tokens "60000")))
@@ -57,13 +119,10 @@ The API provider is now automatically derived from the model.")))
 Each entry is (DISPLAY-NAME . PLIST) where PLIST contains:
   :api        - API provider symbol (openai, anthropic, google)
   :id         - Model ID string for the API
-  :max-tokens - Maximum output tokens as string
-
-This is the single source of truth for model definitions."
+  :max-tokens - Maximum output tokens as string"
   :type '(alist :key-type string :value-type plist)
   :group 'gpt)
 
-;; Default models for multi-model command
 (defcustom gpt-multi-models-default '("GPT-5.2" "Claude 4.5 Opus" "Gemini 3 Pro (Preview)")
   "Models used by `gpt-chat-multi-models'.
 Use a prefix argument (C-u) to pick models interactively.
@@ -83,25 +142,34 @@ Model names must match keys in `gpt-available-models'."
            when (equal (plist-get plist :id) model-id)
            return (plist-get plist :api)))
 
-;; Install watcher to warn users about deprecated manual gpt-api-type setting
-(add-variable-watcher 'gpt-api-type #'gpt--api-type-watcher)
+;;; Thinking budget (must be defined before gpt-model due to initialization order)
+
+(defcustom gpt-thinking-budget-fraction 3
+  "Fraction of max_tokens to allocate for thinking budget.
+The thinking budget is calculated as (max_tokens / gpt-thinking-budget-fraction)."
+  :type 'integer
+  :group 'gpt)
+
+(defvar gpt-thinking-budget "21333"
+  "Token budget for extended thinking mode.
+Automatically set based on `gpt-thinking-budget-fraction'.")
+
+;;; Settings
 
 (defun gpt-update-model-settings ()
-  "Update max_tokens, thinking_budget, and api_type based on the current model.
-Automatically derives the API provider from the model definition to keep
-`gpt-api-type' in sync with `gpt-model'."
-  (let* ((max-tokens (or (gpt--model-max-tokens gpt-model) "64000"))  ; Default if model not found
+  "Update max_tokens, thinking_budget, and api_type based on the current model."
+  (let* ((max-tokens (or (gpt--model-max-tokens gpt-model) "64000"))
          (max-tokens-num (string-to-number max-tokens))
          (thinking-budget-num (/ max-tokens-num gpt-thinking-budget-fraction))
          (thinking-budget (number-to-string thinking-budget-num))
          (api-type (gpt--get-model-api gpt-model)))
     (setq gpt-max-tokens max-tokens)
     (setq gpt-thinking-budget thinking-budget)
-    ;; Automatically sync API type with model to eliminate manual synchronization
     (when api-type
       (setq gpt-api-type api-type))
-    ;; Avoid noisy messages during package load; keep variables in sync silently.
-    ))
+    ;; Update backend for new API type (only after init complete)
+    (when (featurep 'gpt-core)
+      (setq gpt-backend (gpt-get-backend api-type)))))
 
 (defun gpt--set-model (symbol value)
   "Set SYMBOL to VALUE and refresh derived settings."
@@ -118,7 +186,7 @@ NEWVAL is the new value and OPERATION is the kind of change (set/let)."
       (gpt-update-model-settings))))
 
 (defcustom gpt-model "claude-opus-4-5"
-  "The model to use (e.g., \\='gpt-4.1\\=', \\='claude-opus-4-5\\=')."
+  "The model to use (e.g., \\='gpt-5.2\\=', \\='claude-opus-4-5\\=')."
   :type 'string
   :set #'gpt--set-model
   :group 'gpt)
@@ -133,128 +201,82 @@ NEWVAL is the new value and OPERATION is the kind of change (set/let)."
   :type 'string
   :group 'gpt)
 
+;;; API Keys
+
 (defcustom gpt-openai-key nil
-  "The OpenAI API key to use.
-Set to nil if not configured."
+  "The OpenAI API key to use."
   :type '(choice (const :tag "Not set" nil)
                  (string :tag "API key"))
   :group 'gpt)
 
 (defcustom gpt-anthropic-key nil
-  "The Anthropic API key to use.
-Set to nil if not configured."
+  "The Anthropic API key to use."
   :type '(choice (const :tag "Not set" nil)
                  (string :tag "API key"))
   :group 'gpt)
 
 (defcustom gpt-google-key nil
-  "The Google Gemini API key to use.
-Set to nil if not configured."
+  "The Google Gemini API key to use."
   :type '(choice (const :tag "Not set" nil)
                  (string :tag "API key"))
   :group 'gpt)
 
+;;; Anthropic-specific settings
+
 (defcustom gpt-thinking-enabled t
-  "Enable extended thinking mode for Anthropic models.
-
-Constraints when enabled:
-- Temperature must be 1.0 (automatically enforced by the API)
-- Thinking budget must be less than max_tokens
-- Interleaved thinking and 1M context beta are mutually exclusive
-
-Extended thinking allows the model to reason step-by-step before
-responding, which can improve quality for complex tasks."
+  "Enable extended thinking mode for Anthropic models."
   :type 'boolean
   :group 'gpt)
 
 (defcustom gpt-interleaved-thinking t
-  "Enable interleaved thinking with tools for Anthropic models.
-
-When enabled, thinking blocks are streamed as they occur, showing
-the model's reasoning process in real-time.
-
-Note: Interleaved thinking is mutually exclusive with the 1M context
-window beta.  When interleaved thinking is enabled, the context window
-is limited to the standard size."
+  "Enable interleaved thinking with tools for Anthropic models."
   :type 'boolean
   :group 'gpt)
 
 (defcustom gpt-web-search t
-  "Enable web search for models that support it.
-
-For Anthropic models, this uses the built-in web search tool to
-ground responses with current information from the web.
-
-Note: Web search adds latency but improves accuracy for questions
-about recent events or facts that may have changed since training."
+  "Enable web search for models that support it."
   :type 'boolean
   :group 'gpt)
 
-;; OpenAI reasoning settings for GPT-5 family
+;;; OpenAI-specific settings
+
 (defcustom gpt-openai-reasoning-effort "medium"
   "Reasoning effort for OpenAI GPT-5 family models: low, medium, or high."
   :type '(choice (const "low") (const "medium") (const "high"))
   :group 'gpt)
 
 (defcustom gpt-openai-reasoning-summary "detailed"
-  "Reasoning summary for OpenAI GPT-5 family models.
-Use nil, auto, concise, or detailed."
+  "Reasoning summary for OpenAI GPT-5 family models."
   :type '(choice (const nil)
                  (const "auto")
                  (const "concise")
                  (const "detailed"))
   :group 'gpt)
 
-(defcustom gpt-thinking-budget-fraction 3
-  "Fraction of max_tokens to allocate for thinking budget.
-The thinking budget is calculated as (max_tokens / gpt-thinking-budget-fraction).
-Default value of 3 means thinking gets 1/3 of max tokens."
-  :type 'integer
-  :group 'gpt)
-
-(defvar gpt-thinking-budget "21333"
-  "Token budget for extended thinking mode.
-Automatically set based on `gpt-thinking-budget-fraction'.")
-
-(defcustom gpt-python-path
-  (let* ((script-dir (when (or load-file-name buffer-file-name)
-                       (file-name-directory (or load-file-name buffer-file-name))))
-         (venv-python (when script-dir
-                        (expand-file-name ".venv/bin/python" script-dir))))
-    (if (and venv-python (file-exists-p venv-python))
-        venv-python
-      (or (executable-find "python3")
-          (executable-find "python")
-          "python3")))
-  "The path to your python executable."
-  :type 'string
-  :group 'gpt)
+;;; UI Settings
 
 (defcustom gpt-use-named-buffers t
-  "If non-nil, use named buffers for GPT output.  Otherwise, use temporary buffers."
+  "If non-nil, use named buffers for GPT output."
   :type 'boolean
   :group 'gpt)
 
 (defcustom gpt-use-markdown-mode t
-  "Whether to use markdown-mode features when available.
-When non-nil and markdown-mode is installed, gpt-mode will
-inherit markdown syntax highlighting and features."
+  "Whether to use markdown-mode features when available."
   :type 'boolean
   :group 'gpt)
+
+;;; Command history
 
 (defvar gpt-command-history nil
   "A list of GPT commands that have been entered by the user.")
 
-(defvar gpt-script-path (expand-file-name "gpt.py" (file-name-directory (or load-file-name buffer-file-name)))
-  "The path to the Python script used by gpt.el.")
-
-;; Integrate with savehist if available and active
 (when (boundp 'savehist-additional-variables)
   (add-to-list 'savehist-additional-variables 'gpt-command-history))
 
+;;; Validation
+
 (defun gpt-validate-api-key ()
-  "Check that the API key for the current `gpt-api-type' is configured.
-Signals a `user-error' with a helpful message if the key is not set."
+  "Check that the API key for the current `gpt-api-type' is configured."
   (let ((api-key (cond ((eq gpt-api-type 'openai) gpt-openai-key)
                        ((eq gpt-api-type 'anthropic) gpt-anthropic-key)
                        ((eq gpt-api-type 'google) gpt-google-key)
@@ -265,6 +287,8 @@ Signals a `user-error' with a helpful message if the key is not set."
     (when (or (null api-key) (string-empty-p api-key))
       (user-error "API key for %s is not set. Please configure `%s'"
                   (symbol-name gpt-api-type) key-var))))
+
+;;; History functions
 
 (defun gpt-display-command-history ()
   "Display the `gpt-command-history' in a buffer."
@@ -287,27 +311,26 @@ Signals a `user-error' with a helpful message if the key is not set."
     (dolist (cmd gpt-command-history)
       (insert (format "%s\n" cmd)))))
 
+;;; Utilities
+
 (defun gpt-read-command-with-space (prompt collection &optional predicate require-match initial-input hist def inherit-input-method)
   "Read string in minibuffer with completion, treating space literally.
-
-The arguments are the same as for `completing-read', except that
-space does not trigger completion or cycling, but inserts a space
-character.  PROMPT is the prompt to display, COLLECTION is the
-list of possible completions, and the optional arguments PREDICATE
-REQUIRE-MATCH INITIAL-INPUT HIST DEF and INHERIT-INPUT-METHOD
-have the same meaning as for `completing-read'."
+PROMPT, COLLECTION, PREDICATE, REQUIRE-MATCH, INITIAL-INPUT, HIST, DEF,
+and INHERIT-INPUT-METHOD have the same meaning as for `completing-read'."
   (let ((minibuffer-local-completion-map
          (let ((map (copy-keymap minibuffer-local-completion-map)))
            (define-key map " " 'self-insert-command)
            map)))
     (completing-read prompt collection predicate require-match initial-input hist def inherit-input-method)))
 
-;; Initialize settings on load
+;;; Initialize settings on load
+
 (gpt-update-model-settings)
 
-;; Keep derived settings in sync when gpt-model changes via setq/customize.
+;; Keep derived settings in sync when gpt-model changes
 (defvar gpt--model-watcher-installed nil
   "Whether the gpt-model watcher has been installed.")
+
 (when (and (fboundp 'add-variable-watcher)
            (not gpt--model-watcher-installed))
   (add-variable-watcher 'gpt-model #'gpt--model-watcher)

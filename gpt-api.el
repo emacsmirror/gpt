@@ -1,9 +1,9 @@
 ;;; gpt-api.el --- API functionality for gpt.el -*- lexical-binding: t; package-lint-main-file: "gpt.el"; -*-
 
-;; Copyright (C) 2022 Andreas Stuhlmueller
+;; Copyright (C) 2022-2025 Andreas Stuhlmueller
 
 ;; Author: Andreas Stuhlmueller <emacs@stuhlmueller.org>
-;; Version: 2.0
+;; Version: 3.0
 ;; Keywords: openai, anthropic, claude, language, copilot, convenience, tools
 ;; URL: https://github.com/stuhlmueller/gpt.el
 ;; License: MIT
@@ -11,163 +11,192 @@
 
 ;;; Commentary:
 
-;; This file contains API-related functions and process management for gpt.el.
+;; This file contains API-related functions for gpt.el.
+;; This is the pure Elisp version using url.el and curl for HTTP.
 
 ;;; Code:
 
 (require 'gpt-core)
+(require 'gpt-backend)
+(require 'gpt-http)
+(require 'eieio)
+
 (declare-function gpt--start-spinner "gpt-mode" nil)
 (declare-function gpt--stop-spinner "gpt-mode" nil)
+(declare-function gpt-google--build-url "gpt-google" (backend model &optional stream))
 
-(defun gpt-create-prompt-file (buffer)
-  "Create a temporary file containing the prompt from BUFFER.
-Sets restrictive permissions (owner read/write only) to protect sensitive data."
-  (let ((temp-file (make-temp-file "gpt-prompt-")))
-    ;; Set restrictive permissions to protect potentially sensitive prompt content
-    (set-file-modes temp-file #o600)
+;;; Request state tracking
+
+(defvar-local gpt--request-process nil
+  "The active request process for this buffer.")
+
+(defvar-local gpt--output-marker nil
+  "Marker for where to insert streamed output.")
+
+;;; Message parsing
+
+(defun gpt-parse-buffer-messages (buffer)
+  "Parse BUFFER content into a list of message plists."
+  (with-current-buffer buffer
+    (gpt-backend--parse-messages
+     (buffer-substring-no-properties (point-min) (point-max)))))
+
+;;; Streaming output handling
+
+(defun gpt--insert-thinking-start ()
+  "Insert thinking block start marker."
+  (insert "\n[Thinking...]\n"))
+
+(defun gpt--insert-thinking-end ()
+  "Insert thinking block end marker."
+  (insert "\n[Thinking done.]\n\n"))
+
+(defvar-local gpt--in-thinking-block nil
+  "Non-nil if we're currently inside a thinking block.")
+
+(defun gpt--insert-stream-output (buffer content thinking)
+  "Insert streaming CONTENT and THINKING into BUFFER."
+  (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (write-region (point-min) (point-max) temp-file))
-    temp-file))
+      (let ((inhibit-read-only t)
+            (at-end (= (point) (point-max))))
+        ;; Handle thinking content
+        (when thinking
+          (save-excursion
+            (goto-char (point-max))
+            (unless gpt--in-thinking-block
+              (gpt--insert-thinking-start)
+              (setq gpt--in-thinking-block t))
+            (insert thinking)))
+        ;; Handle main content
+        (when content
+          (save-excursion
+            (goto-char (point-max))
+            ;; Close thinking block if open
+            (when gpt--in-thinking-block
+              (gpt--insert-thinking-end)
+              (setq gpt--in-thinking-block nil))
+            (insert content)))
+        ;; Keep point at end if it was there
+        (when at-end
+          (goto-char (point-max)))))))
 
-(defun gpt-start-process (prompt-file buffer)
-  "Start GPT process with PROMPT-FILE and output to BUFFER."
-  (let* (;; Determine API key based on gpt-api-type
-         (api-key (cond ((eq gpt-api-type 'openai) gpt-openai-key)
-                        ((eq gpt-api-type 'anthropic) gpt-anthropic-key)
-                        ((eq gpt-api-type 'google) gpt-google-key)
-                        (t nil)))
-         (process-environment
-          (append
-           (list
-            ;; Non-secret config only - API keys passed via stdin for security
-            (format "GPT_API_TYPE=%s" (symbol-name gpt-api-type))
-            (format "GPT_MODEL=%s" gpt-model)
-            (format "GPT_MAX_TOKENS=%s" gpt-max-tokens)
-            (format "GPT_TEMPERATURE=%s" gpt-temperature)
-            ;; OpenAI reasoning controls (for gpt-5 family)
-            (format "GPT_OPENAI_REASONING_EFFORT=%s" gpt-openai-reasoning-effort)
-            (format "GPT_OPENAI_REASONING_SUMMARY=%s" (or gpt-openai-reasoning-summary "")))
-           process-environment))
-         ;; Build command arguments (api_key removed - passed via stdin)
-         (cmd-args (list gpt-python-path gpt-script-path
-                         gpt-model gpt-max-tokens gpt-temperature
-                         (symbol-name gpt-api-type) prompt-file))
-         ;; Create a hidden buffer to capture stderr to avoid default
-         ;; sentinel inserting "Process ... finished" messages.
-         (stderr-buffer (generate-new-buffer " *gpt-stderr*")))
-    ;; Validate API key (handles nil, empty, etc.)
+(defun gpt--finalize-stream (buffer success error-msg)
+  "Finalize streaming request to BUFFER with SUCCESS and ERROR-MSG."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      ;; Close any open thinking block
+      (when gpt--in-thinking-block
+        (save-excursion
+          (goto-char (point-max))
+          (gpt--insert-thinking-end))
+        (setq gpt--in-thinking-block nil))
+      ;; Stop spinner
+      (when (fboundp 'gpt--stop-spinner)
+        (gpt--stop-spinner))
+      ;; Ensure newline at end
+      (save-excursion
+        (goto-char (point-max))
+        (unless (bolp)
+          (insert "\n")))
+      ;; Report errors
+      (if success
+          (gpt-message "Request completed.")
+        (gpt-message "Request failed: %s" (or error-msg "Unknown error"))))))
+
+;;; API request functions
+
+(defun gpt-run-buffer (buffer)
+  "Run GPT request with BUFFER content as input.
+Appends streaming output to the buffer."
+  (with-current-buffer buffer
+    ;; Kill any existing process
+    (when (and gpt--request-process
+               (process-live-p gpt--request-process))
+      (if (y-or-n-p "A GPT process is running here. Kill it and start a new one? ")
+          (delete-process gpt--request-process)
+        (user-error "Aborted. Existing GPT process is still running")))
+    ;; Validate API key
     (gpt-validate-api-key)
-    ;; Add thinking mode arguments for Anthropic
-    (when (eq gpt-api-type 'anthropic)
-      (when gpt-thinking-enabled
-        (setq cmd-args (append cmd-args
-                               (list "--thinking-enabled"
-                                     "--thinking-budget" gpt-thinking-budget))))
-      (when gpt-interleaved-thinking
-        (setq cmd-args (append cmd-args '("--interleaved-thinking"))))
-      (when gpt-web-search
-        (setq cmd-args (append cmd-args '("--web-search")))))
-    ;; Add web search argument if enabled and not already added for Anthropic
-    (when (and gpt-web-search (not (eq gpt-api-type 'anthropic)))
-      (setq cmd-args (append cmd-args '("--web-search"))))
-    ;; Validate thinking mode constraints for Anthropic
-    (when (and (eq gpt-api-type 'anthropic) gpt-thinking-enabled)
-      (let ((budget (string-to-number gpt-thinking-budget))
-            (max-tok (string-to-number gpt-max-tokens)))
-        (when (>= budget max-tok)
-          (user-error "Thinking budget (%s) must be less than max_tokens (%s)"
-                      gpt-thinking-budget gpt-max-tokens))))
-    ;; Validate script exists
-    (unless (file-exists-p gpt-script-path)
-      (user-error "GPT script not found at %s" gpt-script-path))
-    ;; Create process with error handling
-    (condition-case err
-        (let* ((proc (make-process
-                      :name "gpt"
-                      :buffer buffer
-                      :command cmd-args
-                      :coding 'utf-8-unix
-                      :connection-type 'pipe
-                      ;; Route stderr to hidden buffer; we'll mirror to BUFFER manually.
-                      :stderr stderr-buffer))
-               (stderr-proc (and (buffer-live-p stderr-buffer)
-                                  (get-buffer-process stderr-buffer))))
-          ;; Send API key via stdin (more secure than env vars or command line)
-          (process-send-string proc (concat api-key "\n"))
-          ;; Remember stderr buffer so we can clean it later.
-          (process-put proc 'gpt-stderr-buffer stderr-buffer)
-          ;; Mirror stderr chunks into the main output buffer without default sentinel noise.
-          (when stderr-proc
-            (set-process-filter stderr-proc
-                                (lambda (_p chunk)
-                                  (when (buffer-live-p buffer)
-                                    (with-current-buffer buffer
-                                      (let ((at-eob (= (point) (point-max))))
-                                        (save-excursion
-                                          (goto-char (point-max))
-                                          (insert chunk))
-                                        (when at-eob (goto-char (point-max))))))))
-            ;; Prevent default "Process ... finished" insertion; clean hidden buffer on exit.
-            (set-process-sentinel stderr-proc
-                                  (lambda (p _msg)
-                                    (let ((buf (process-buffer p)))
-                                      (when (buffer-live-p buf)
-                                        (kill-buffer buf))))))
-          proc)
-      (file-error
-       (when (buffer-live-p stderr-buffer)
-         (kill-buffer stderr-buffer))
-       (gpt-message "Failed to start process (file error): %s\nPython path: %s\nScript path: %s\nCommand: %s"
-                    (error-message-string err)
-                    gpt-python-path
-                    gpt-script-path
-                    (mapconcat #'identity cmd-args " "))
-       nil)
-      (error
-       (when (buffer-live-p stderr-buffer)
-         (kill-buffer stderr-buffer))
-       (gpt-message "Failed to start process: %s\nPython path: %s\nScript path: %s\nCommand: %s"
-                    (error-message-string err)
-                    gpt-python-path
-                    gpt-script-path
-                    (mapconcat #'identity cmd-args " "))
-       nil))))
+    ;; Ensure we have a valid backend (not just non-nil, but correct type)
+    (unless (gpt--backend-valid-p gpt-backend gpt-api-type)
+      (setq gpt-backend (gpt-get-backend gpt-api-type)))
+    (unless gpt-backend
+      (user-error "Failed to create backend for %s" gpt-api-type))
+    ;; Parse messages from buffer
+    (let* ((messages (gpt-parse-buffer-messages buffer))
+           (options (list :model gpt-model
+                          :max-tokens (string-to-number gpt-max-tokens)
+                          :temperature (string-to-number gpt-temperature)))
+           ;; Add provider-specific options
+           (options (if (eq gpt-api-type 'anthropic)
+                        (plist-put
+                         (plist-put
+                          (plist-put
+                           (plist-put options :thinking-enabled gpt-thinking-enabled)
+                           :thinking-budget (string-to-number gpt-thinking-budget))
+                          :interleaved-thinking gpt-interleaved-thinking)
+                         :web-search gpt-web-search)
+                      options))
+           (options (if (eq gpt-api-type 'openai)
+                        (plist-put
+                         (plist-put options :reasoning-effort gpt-openai-reasoning-effort)
+                         :reasoning-summary gpt-openai-reasoning-summary)
+                      options))
+           ;; Build request
+           (request-data (gpt-backend-stream-request-data gpt-backend messages options))
+           (headers (gpt-backend-headers gpt-backend))
+           (url (if (eq gpt-api-type 'google)
+                    (progn
+                      (require 'gpt-google)
+                      (gpt-google--build-url gpt-backend gpt-model t))
+                  (oref gpt-backend url))))
+      ;; Move to end of buffer for output
+      (goto-char (point-max))
+      (setq gpt--in-thinking-block nil)
+      ;; Start spinner
+      (when (fboundp 'gpt--start-spinner)
+        (gpt--start-spinner))
+      (gpt-message "Running request...")
+      ;; Make streaming request
+      (if (gpt-http--curl-available-p)
+          (setq gpt--request-process
+                (gpt-http-stream-request
+                 url headers request-data gpt-backend
+                 (lambda (content thinking)
+                   (gpt--insert-stream-output buffer content thinking))
+                 (lambda (success error-msg)
+                   (gpt--finalize-stream buffer success error-msg))))
+        ;; Fallback to non-streaming url-retrieve
+        (gpt-http--url-request
+         url headers request-data
+         (lambda (response http-status error-msg)
+           (if error-msg
+               (gpt--finalize-stream buffer nil error-msg)
+             (let ((content (gpt-backend-parse-response gpt-backend response)))
+               (if (stringp content)
+                   (gpt--insert-stream-output buffer content nil)
+                 ;; Handle response with thinking
+                 (when-let* ((thinking (plist-get content :thinking)))
+                   (gpt--insert-stream-output buffer nil thinking))
+                 (gpt--insert-stream-output buffer (plist-get content :content) nil))
+               (gpt--finalize-stream buffer t nil)))))))))
 
-(defun gpt-start-timer (process)
-  "Start a timer to check if PROCESS is still running."
-  (let (timer)
-    (setq timer
-          (run-with-timer
-           0.1 0.1
-           (lambda ()
-             (unless (process-live-p process)
-               (when timer
-                 (cancel-timer timer))
-               (gpt-message "Command completed.")))))
-    timer))
+(defun gpt-abort-request (&optional buffer)
+  "Abort any active request in BUFFER (default current buffer)."
+  (interactive)
+  (let ((buf (or buffer (current-buffer))))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (and gpt--request-process
+                   (process-live-p gpt--request-process))
+          (delete-process gpt--request-process)
+          (setq gpt--request-process nil)
+          (when (fboundp 'gpt--stop-spinner)
+            (gpt--stop-spinner))
+          (message "GPT request aborted"))))))
 
-(defun gpt-set-process-sentinel (process timer prompt-file)
-  "Set up process sentinel for PROCESS with TIMER and PROMPT-FILE."
-  (set-process-sentinel
-   process
-   (lambda (proc _msg)
-     (when timer
-       (cancel-timer timer))
-     (when (file-exists-p prompt-file)
-       (delete-file prompt-file))
-     ;; Clean up stderr buffer if present
-     (let ((stderr-buf (process-get proc 'gpt-stderr-buffer)))
-       (when (buffer-live-p stderr-buf)
-         (kill-buffer stderr-buf)))
-     (when (eq (process-status proc) 'exit)
-       (with-current-buffer (process-buffer proc)
-         ;; Stop spinner if available
-         (when (fboundp 'gpt--stop-spinner)
-           (gpt--stop-spinner))
-         (save-excursion
-           (goto-char (point-max))
-           (unless (bolp)
-             (insert "\n"))))))))
+;;; Utility functions
 
 (defun gpt-message (format-string &rest args)
   "Display a message in the echo area using FORMAT-STRING and ARGS."
@@ -177,35 +206,6 @@ Sets restrictive permissions (owner read/write only) to protect sensitive data."
   "Get BUFFER text as string."
   (with-current-buffer buffer
     (buffer-string)))
-
-(defun gpt-run-buffer (buffer)
-  "Run GPT command with BUFFER text as input.
-Append output stream to output-buffer."
-  (with-current-buffer buffer
-    ;; If a process is already running for this buffer, prompt to stop it first.
-    (let ((existing (get-buffer-process (current-buffer))))
-      (when (and existing (process-live-p existing))
-        (if (y-or-n-p "A GPT process is running here. Kill it and start a new one? ")
-            (progn (delete-process existing)
-                   ;; Give Emacs a tick to run process sentinel cleanup
-                   (sit-for 0.05))
-          (user-error "Aborted. Existing GPT process is still running."))))
-    (goto-char (point-max))
-    (font-lock-ensure)
-    (let* ((prompt-file (gpt-create-prompt-file buffer))
-           (process (gpt-start-process prompt-file buffer)))
-      (if process
-          (let ((timer (gpt-start-timer process)))
-            (gpt-set-process-sentinel process timer prompt-file)
-            (gpt-message "Running command...")
-            ;; Start mode-line spinner if available
-            (when (fboundp 'gpt--start-spinner)
-              (with-current-buffer buffer (gpt--start-spinner)))
-            (font-lock-ensure))
-        ;; Process creation failed
-        (when (file-exists-p prompt-file)
-          (delete-file prompt-file))
-          (gpt-message "Failed to start GPT process")))))
 
 (provide 'gpt-api)
 ;;; gpt-api.el ends here

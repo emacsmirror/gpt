@@ -27,7 +27,8 @@
       "WebSearch",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:forum.systemcrafters.net)",
-      "WebFetch(domain:blog.kaorubb.org)"
+      "WebFetch(domain:blog.kaorubb.org)",
+      "Bash(curl:*)"
     ],
     "deny": []
   }

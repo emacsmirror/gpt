@@ -1,9 +1,9 @@
 ;;; gpt-ui.el --- UI functionality for gpt.el -*- lexical-binding: t; package-lint-main-file: "gpt.el"; -*-
 
-;; Copyright (C) 2022 Andreas Stuhlmueller
+;; Copyright (C) 2022-2025 Andreas Stuhlmueller
 
 ;; Author: Andreas Stuhlmueller <emacs@stuhlmueller.org>
-;; Version: 2.0
+;; Version: 3.0
 ;; Keywords: openai, anthropic, claude, language, copilot, convenience, tools
 ;; URL: https://github.com/stuhlmueller/gpt.el
 ;; License: MIT
@@ -12,6 +12,7 @@
 ;;; Commentary:
 
 ;; This file contains user interface functions and buffer management for gpt.el.
+;; This is the pure Elisp version - no Python dependencies.
 
 ;;; Code:
 

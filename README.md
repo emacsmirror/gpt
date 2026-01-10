@@ -6,11 +6,14 @@
 
 gpt.el is an Emacs package that lets you interact with instruction-following language models like GPT-5.2, Claude 4.5 Opus, Claude 4.5 Sonnet, and Gemini 3 Pro from your editor. You can type a natural language command (with history and completion support) and optionally use the current region or buffer contents as input for the model. The package displays the output of the model in a temporary or named buffer, and updates it as the model generates more text. You can issue follow-up commands that provide the interaction history in that buffer as context. You can also browse, save, and clear the command history for later reference.
 
+**This is a pure Elisp implementation** - no Python or external dependencies required beyond Emacs 28.1+ and `curl` for streaming.
+
 ## Features
 
 - **Multi-provider support**: OpenAI, Anthropic, and Google Gemini APIs
+- **Pure Elisp**: No Python dependencies - everything runs natively in Emacs
 - **Seamless Emacs integration**: Use current buffer/region as context
-- **Streaming responses**: Real-time output as the model generates text
+- **Streaming responses**: Real-time output as the model generates text (via curl)
 - **Interactive conversations**: Follow-up commands with conversation history
 - **Command history**: Browse, save, and clear your command history
 - **Flexible context modes**: All buffers, current buffer, or no context
@@ -22,34 +25,9 @@ gpt.el is an Emacs package that lets you interact with instruction-following lan
 
 ### Prerequisites
 
-You need to have at least one of the `openai`, `anthropic`, or `google-genai` Python packages as well as `jsonlines`. You'll also need valid API keys for OpenAI, Anthropic, or Google.
-
-#### Python Dependencies
-
-**If installing from source** and you have `uv` (recommended):
-
-```bash
-uv sync
-```
-
-**If you don't have `uv`, install it first:**
-
-```bash
-brew install uv  # On macOS
-# or
-pip install uv
-```
-
-**Alternative: Using pip with virtual environment:**
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate  # On macOS/Linux
-# or .venv\Scripts\activate  # On Windows
-pip install -r requirements.txt
-```
-
-**Note:** On modern macOS systems, you cannot install packages globally with pip due to [PEP 668](https://peps.python.org/pep-0668/). The package automatically detects your virtual environment if you're installing from source.
+- Emacs 28.1 or later
+- `curl` (for streaming responses) - pre-installed on macOS and most Linux distributions
+- Valid API keys for OpenAI, Anthropic, or Google
 
 #### API Keys
 
@@ -107,20 +85,6 @@ Optionally, customize the model parameters:
 (setq gpt-model "claude-opus-4-5")  ; Default model (auto-updates token budget)
 (setq gpt-max-tokens "64000")  ; Automatically set based on model
 (setq gpt-temperature "0")
-```
-
-### Python Path Configuration
-
-The package automatically detects your Python executable in this order:
-
-1. Virtual environment (`.venv/bin/python`) if installing from source
-2. System `python3` command
-3. System `python` command
-
-If you need to specify a custom Python path:
-
-```elisp
-(setq gpt-python-path "/path/to/your/python")
 ```
 
 ### Available Models
@@ -236,69 +200,62 @@ Web search allows Claude to access current information from the web, useful for 
 - `gpt-web-search` - Enable/disable web search (default: t)
 - `C-c C-j w` - Toggle web search
 
+## Architecture
+
+gpt.el is implemented entirely in Emacs Lisp with a modular backend architecture:
+
+```
+gpt.el                 Main entry point
+├── gpt-core.el        Core configuration and model management
+├── gpt-api.el         API request orchestration
+├── gpt-http.el        HTTP layer (url.el + curl for streaming)
+├── gpt-ui.el          User interface and buffer management
+├── gpt-mode.el        Major mode for GPT buffers
+└── backends/
+    ├── gpt-backend.el     Base backend class (EIEIO)
+    ├── gpt-openai.el      OpenAI provider
+    ├── gpt-anthropic.el   Anthropic provider (with thinking/web search)
+    └── gpt-google.el      Google Gemini provider
+```
+
+### Backend System
+
+Each provider implements the `gpt-backend` base class using EIEIO (Emacs's object system):
+
+- `gpt-backend-headers` - Generate authentication headers
+- `gpt-backend-request-data` - Build API request payload
+- `gpt-backend-parse-response` - Parse API response
+- `gpt-backend-parse-stream-chunk` - Parse streaming SSE chunks
+
+### HTTP Layer
+
+- **Non-streaming**: Uses built-in `url.el` for standard requests
+- **Streaming**: Uses `curl` subprocess for Server-Sent Events (SSE)
+
 ## Development
+
+### Running Tests
+
+Unit tests (no API keys required):
+
+```bash
+emacs -Q -batch -l test/gpt-test.el -f ert-run-tests-batch-and-exit
+```
+
+Integration tests (requires API keys as environment variables):
+
+```bash
+export OPENAI_API_KEY="your-key"
+export ANTHROPIC_API_KEY="your-key"
+export GOOGLE_API_KEY="your-key"
+emacs -Q -batch -l test/gpt-integration-test.el -f gpt-integration-run-tests
+```
+
+### Code Quality
 
 Run `make check` to validate parentheses, load each file, byte-compile, and lint the Elisp sources. Use `make help` to see all available maintenance targets.
 
-## Backend (gpt.py)
-
-The Emacs package uses a Python backend script (`gpt.py`) to handle API calls. This script can also be used standalone:
-
-```bash
-# API key is read from stdin for security (not visible in process list)
-echo "your-api-key" | .venv/bin/python gpt.py <model> <max_tokens> <temperature> <api_type> <prompt_file>
-```
-
-### Backend Features
-
-- **Secure API key handling**: Keys passed via stdin, not command line
-- **Specific exception handling**: Custom errors for each API provider
-- **Conversation format parsing**: Supports `User:` / `Assistant:` blocks
-- **Automatic logging**: Conversations saved to JSONL format
-- **Streaming output**: Real-time response display
-- **Extended thinking**: Anthropic thinking mode with interleaved output
-- **Web search**: Grounded responses with web search (Anthropic)
-- **OpenAI reasoning**: Reasoning summaries for GPT-5 family
-
 ## Troubleshooting
-
-### "No such file or directory, python"
-
-If you see this error, it means your system doesn't have a `python` command available. This is common on modern macOS systems. Solutions:
-
-1. **Automatic detection** (recommended): The package should automatically detect `python3`. If it doesn't, restart Emacs.
-2. **Manual configuration**: Set the Python path explicitly:
-   ```elisp
-   (setq gpt-python-path "python3")
-   ```
-3. **Virtual environment**: If installing from source, ensure you've run `uv sync` and the package will use `.venv/bin/python`.
-
-### "externally-managed-environment" Error
-
-This is a modern Python safety feature. Use one of these solutions:
-
-1. **Use uv** (recommended):
-   ```bash
-   uv sync
-   ```
-2. **Create a virtual environment**:
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
-
-### Python Package Import Errors
-
-Ensure you have the required packages installed in the Python environment that gpt.el is using:
-
-```bash
-# Check what Python gpt.el is using
-# In Emacs: M-x eval-expression RET gpt-python-path
-
-# Then test the packages
-/path/to/your/python -c "import anthropic, openai, google.genai, jsonlines"
-```
 
 ### API Key Errors
 
@@ -315,10 +272,24 @@ If you get errors about missing or invalid API keys:
 
 3. **Restart Emacs**: After setting keys, restart Emacs to ensure they're loaded.
 
-4. **Test from Python**: Verify the key works with the provider's SDK:
-   ```bash
-   python3 -c "from anthropic import Anthropic; Anthropic(api_key='your-key').messages.create(...)"
-   ```
+### curl Not Found
+
+If streaming doesn't work, ensure `curl` is installed and in your PATH:
+
+```bash
+which curl
+# Should output something like /usr/bin/curl
+```
+
+On macOS, curl is pre-installed. On Linux, install via your package manager:
+
+```bash
+# Debian/Ubuntu
+sudo apt install curl
+
+# Fedora
+sudo dnf install curl
+```
 
 ### Process Hangs or Timeouts
 
@@ -332,12 +303,7 @@ If GPT commands hang or don't complete:
    curl -I https://api.anthropic.com/v1/messages
    ```
 
-3. **Check Python script**: Test the backend directly:
-   ```bash
-   echo "your-api-key" | python3 gpt.py claude-opus-4-5 1000 0.0 anthropic /tmp/test-prompt.txt
-   ```
-
-4. **Enable debug output**: Check `*Messages*` buffer for error details.
+3. **Enable debug output**: Check `*Messages*` buffer for error details.
 
 ### Buffer-Specific Issues
 
@@ -348,6 +314,16 @@ If GPT commands fail in certain buffers:
 2. **Check for read-only buffers**: GPT edit commands require writable buffers.
 
 3. **Large buffers**: Very large buffers may exceed token limits. Try selecting a region instead.
+
+## Recent Changes
+
+### 2025-01-09: Pure Elisp Rewrite
+
+- Removed all Python dependencies - gpt.el is now pure Elisp
+- Implemented modular backend system using EIEIO classes
+- Added streaming support via curl for real-time responses
+- Created comprehensive test suite (unit + integration tests)
+- Simplified installation - just Emacs 28.1+ and curl required
 
 ## License
 
