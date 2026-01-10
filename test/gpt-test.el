@@ -689,5 +689,68 @@
     ;; Should not error
     (gpt-validate-api-key)))
 
+;;; ============================================================
+;;; HTTP error handling tests
+;;; ============================================================
+
+(ert-deftest gpt-test-http-retryable-status ()
+  "Test identification of retryable HTTP status codes."
+  (should (gpt-http--retryable-status-p 429))
+  (should (gpt-http--retryable-status-p 500))
+  (should (gpt-http--retryable-status-p 502))
+  (should (gpt-http--retryable-status-p 503))
+  (should (gpt-http--retryable-status-p 504))
+  (should-not (gpt-http--retryable-status-p 200))
+  (should-not (gpt-http--retryable-status-p 400))
+  (should-not (gpt-http--retryable-status-p 401))
+  (should-not (gpt-http--retryable-status-p 404)))
+
+(ert-deftest gpt-test-http-parse-api-error-rate-limit ()
+  "Test parsing rate limit errors."
+  (let ((response '(:error (:type "rate_limit_error"
+                            :message "Too many requests"))))
+    (should (string-match-p "Rate limit"
+                            (gpt-http--parse-api-error response 429)))))
+
+(ert-deftest gpt-test-http-parse-api-error-auth ()
+  "Test parsing authentication errors."
+  (let ((response '(:error (:type "authentication_error"
+                            :message "Invalid API key"))))
+    (should (string-match-p "Authentication failed"
+                            (gpt-http--parse-api-error response 401)))))
+
+(ert-deftest gpt-test-http-parse-api-error-invalid-request ()
+  "Test parsing invalid request errors."
+  (let ((response '(:error (:type "invalid_request_error"
+                            :message "Missing required parameter"))))
+    (should (string-match-p "Invalid request"
+                            (gpt-http--parse-api-error response 400)))))
+
+(ert-deftest gpt-test-http-parse-api-error-model-not-found ()
+  "Test parsing model not found errors."
+  (let ((response '(:error (:message "Model not found: invalid-model"))))
+    (should (string-match-p "Model not found"
+                            (gpt-http--parse-api-error response 404)))))
+
+(ert-deftest gpt-test-http-parse-api-error-server ()
+  "Test parsing server errors."
+  (let ((response '(:error (:message "Internal server error"))))
+    (should (string-match-p "Server error"
+                            (gpt-http--parse-api-error response 500)))))
+
+(ert-deftest gpt-test-http-parse-api-error-overloaded ()
+  "Test parsing overloaded errors."
+  (let ((response '(:error (:type "overloaded_error"
+                            :message "API is overloaded"))))
+    (should (string-match-p "overloaded"
+                            (gpt-http--parse-api-error response 529)))))
+
+(ert-deftest gpt-test-http-parse-api-error-with-code ()
+  "Test parsing errors with error code."
+  (let ((response '(:error (:message "Something went wrong"
+                            :code "RESOURCE_EXHAUSTED"))))
+    (should (string-match-p "RESOURCE_EXHAUSTED"
+                            (gpt-http--parse-api-error response 403)))))
+
 (provide 'gpt-test)
 ;;; gpt-test.el ends here

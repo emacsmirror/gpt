@@ -37,6 +37,17 @@ Curl is required for streaming responses."
   :type 'string
   :group 'gpt)
 
+(defcustom gpt-http-max-retries 3
+  "Maximum number of retries for transient failures."
+  :type 'integer
+  :group 'gpt)
+
+(defcustom gpt-http-retry-delay 1.0
+  "Base delay in seconds between retries.
+Uses exponential backoff: delay * 2^attempt."
+  :type 'number
+  :group 'gpt)
+
 ;;; Error handling
 
 (define-error 'gpt-http-error "GPT HTTP error")
@@ -44,16 +55,65 @@ Curl is required for streaming responses."
 (define-error 'gpt-auth-error "GPT authentication error" 'gpt-api-error)
 (define-error 'gpt-rate-limit-error "GPT rate limit error" 'gpt-api-error)
 
+(defun gpt-http--retryable-status-p (status)
+  "Return non-nil if HTTP STATUS is retryable."
+  (memq status '(429 500 502 503 504)))
+
+(defun gpt-http--parse-api-error (response http-status)
+  "Parse API error from RESPONSE and HTTP-STATUS.
+Returns a formatted error message string."
+  (let* ((err (plist-get response :error))
+         (err-type (or (plist-get err :type) "unknown"))
+         (err-message (or (plist-get err :message)
+                          (when (stringp err) err)
+                          "Unknown error"))
+         ;; Anthropic-specific
+         (err-details (plist-get response :details))
+         ;; OpenAI-specific
+         (err-code (plist-get err :code)))
+    (cond
+     ;; Rate limit
+     ((or (eq http-status 429)
+          (string-match-p "rate" err-type))
+      (format "Rate limit exceeded: %s" err-message))
+     ;; Authentication
+     ((or (eq http-status 401)
+          (string-match-p "auth\\|invalid.*key" err-type))
+      (format "Authentication failed: %s" err-message))
+     ;; Invalid request
+     ((eq http-status 400)
+      (format "Invalid request: %s%s"
+              err-message
+              (if err-details (format " (%s)" err-details) "")))
+     ;; Model not found
+     ((eq http-status 404)
+      (format "Model not found: %s" err-message))
+     ;; Overloaded
+     ((or (eq http-status 529)
+          (string-match-p "overloaded" err-type))
+      (format "API overloaded, please retry: %s" err-message))
+     ;; Server error
+     ((>= http-status 500)
+      (format "Server error (%d): %s" http-status err-message))
+     ;; Generic
+     (t
+      (format "API error (%d): %s%s"
+              http-status
+              err-message
+              (if err-code (format " [%s]" err-code) ""))))))
+
 ;;; URL-based requests (non-streaming)
 
-(defun gpt-http--url-request (url headers data callback)
+(defun gpt-http--url-request (url headers data callback &optional retry-count)
   "Make async HTTP POST request to URL with HEADERS and DATA.
-CALLBACK is called with (RESPONSE HTTP-STATUS ERROR)."
+CALLBACK is called with (RESPONSE HTTP-STATUS ERROR).
+RETRY-COUNT is internal for retry logic."
   (let ((url-request-method "POST")
         (url-request-extra-headers
          (cons '("Content-Type" . "application/json") headers))
         (url-request-data (encode-coding-string
-                           (gpt-backend--json-encode data) 'utf-8)))
+                           (gpt-backend--json-encode data) 'utf-8))
+        (attempt (or retry-count 0)))
     (url-retrieve
      url
      (lambda (status)
@@ -73,20 +133,27 @@ CALLBACK is called with (RESPONSE HTTP-STATUS ERROR)."
                  (setq response (gpt-backend--json-read))
                (error
                 (setq error-msg
-                      (format "JSON parse error: %s. Body: %s"
+                      (format "JSON parse error: %s. Response: %s"
                               (error-message-string parse-err)
                               (buffer-substring-no-properties
                                url-http-end-of-headers
                                (min (+ url-http-end-of-headers 500)
                                     (point-max)))))))))
-         ;; Check for API errors
+         ;; Check for API errors in response body
          (when (and response (plist-get response :error))
-           (let ((err (plist-get response :error)))
-             (setq error-msg
-                   (or (plist-get err :message)
-                       (format "API error: %s" err)))))
-         (kill-buffer (current-buffer))
-         (funcall callback response http-status error-msg)))
+           (setq error-msg (gpt-http--parse-api-error response http-status)))
+         ;; Handle retries for transient errors
+         (if (and (gpt-http--retryable-status-p http-status)
+                  (< attempt gpt-http-max-retries))
+             (let ((delay (* gpt-http-retry-delay (expt 2 attempt))))
+               (kill-buffer (current-buffer))
+               (message "GPT: Request failed with %d, retrying in %.1fs (attempt %d/%d)..."
+                        http-status delay (1+ attempt) gpt-http-max-retries)
+               (run-at-time delay nil
+                            #'gpt-http--url-request url headers data callback (1+ attempt)))
+           ;; No retry - call callback
+           (kill-buffer (current-buffer))
+           (funcall callback response http-status error-msg))))
      nil t nil)))
 
 ;;; Curl-based requests (streaming)
@@ -100,6 +167,9 @@ CALLBACK is called with (RESPONSE HTTP-STATUS ERROR)."
 (defvar-local gpt-http--stream-state nil
   "State for stream parsing.")
 
+(defvar-local gpt-http--http-status nil
+  "HTTP status code from curl response.")
+
 (defun gpt-http--curl-available-p ()
   "Return non-nil if curl is available."
   (and gpt-use-curl
@@ -111,6 +181,7 @@ CALLBACK is called with (RESPONSE HTTP-STATUS ERROR)."
    (list "--silent"
          "--show-error"
          "--no-buffer"
+         "-w" "\n__HTTP_STATUS__:%{http_code}"  ; Write status at end
          "-X" "POST"
          "-H" "Content-Type: application/json")
    ;; Add custom headers
@@ -131,18 +202,18 @@ ON-COMPLETE is called with (SUCCESS ERROR-MSG) when done."
                      (gpt-backend--json-encode data) 'utf-8))
          (args (gpt-http--curl-args url headers))
          (process-buffer (generate-new-buffer " *gpt-curl*"))
-         (stream-buffer "")
-         (stream-state nil)
          proc)
     (with-current-buffer process-buffer
       (setq-local gpt-http--stream-buffer "")
-      (setq-local gpt-http--stream-state nil))
+      (setq-local gpt-http--stream-state nil)
+      (setq-local gpt-http--http-status nil))
     (setq proc
           (make-process
            :name "gpt-curl"
            :buffer process-buffer
            :command (append (list gpt-curl-program) args (list "-d" json-data))
            :coding 'utf-8
+           :connection-type 'pipe
            :filter
            (lambda (proc output)
              (when (buffer-live-p (process-buffer proc))
@@ -156,31 +227,48 @@ ON-COMPLETE is called with (SUCCESS ERROR-MSG) when done."
                     (funcall on-chunk content thinking))))))
            :sentinel
            (lambda (proc event)
-             (let ((success (string-match-p "finished" event))
-                   (error-msg nil))
+             (let ((success nil)
+                   (error-msg nil)
+                   (http-status nil))
                (when (buffer-live-p (process-buffer proc))
                  (with-current-buffer (process-buffer proc)
-                   ;; Check for errors in remaining buffer
-                   (unless success
-                     (setq error-msg
-                           (format "Curl process %s: %s"
-                                   (string-trim event)
-                                   (buffer-string))))
+                   ;; Extract HTTP status from curl output
+                   (when (string-match "__HTTP_STATUS__:\\([0-9]+\\)"
+                                       gpt-http--stream-buffer)
+                     (setq http-status (string-to-number (match-string 1 gpt-http--stream-buffer))))
+                   ;; Determine success
+                   (setq success (and (string-match-p "finished" event)
+                                      (or (null http-status)
+                                          (< http-status 400))))
+                   ;; Check for process errors
+                   (when (string-match-p "\\(exited\\|signal\\)" event)
+                     (unless (string-match-p "finished" event)
+                       (setq error-msg
+                             (format "Process terminated: %s" (string-trim event)))))
                    ;; Check for API error in response
-                   (when (and success
-                              (string-match-p "\"error\"" (buffer-string)))
+                   (when (string-match-p "\"error\"" gpt-http--stream-buffer)
                      (condition-case nil
-                         (let* ((json-start (string-match "{" (buffer-string)))
+                         (let* ((buf gpt-http--stream-buffer)
+                                (json-start (string-match "{[^}]*\"error\"" buf))
                                 (response (when json-start
                                             (gpt-backend--json-read-from-string
-                                             (substring (buffer-string) json-start)))))
-                           (when-let* ((err (plist-get response :error)))
+                                             (substring buf json-start)))))
+                           (when (plist-get response :error)
                              (setq success nil
-                                   error-msg (plist-get err :message))))
-                       (error nil)))))
+                                   error-msg (gpt-http--parse-api-error
+                                              response (or http-status 0)))))
+                       (error nil)))
+                   ;; If we have an HTTP error but no parsed message, provide generic one
+                   (when (and (not success) (not error-msg) http-status (>= http-status 400))
+                     (setq error-msg (format "HTTP error %d" http-status)))))
+               ;; Call completion handler
                (funcall on-complete success error-msg)
+               ;; Clean up process buffer
                (when (buffer-live-p (process-buffer proc))
                  (kill-buffer (process-buffer proc)))))))
+    ;; Store process reference
+    (with-current-buffer process-buffer
+      (setq gpt-http--curl-process proc))
     proc))
 
 (defun gpt-http--process-stream-data (backend on-data)
@@ -192,19 +280,21 @@ ON-DATA is called with (CONTENT THINKING) for each parsed chunk."
     (while (string-match "\n" data pos)
       (let ((line (substring data pos (match-beginning 0))))
         (setq pos (match-end 0))
-        ;; Handle SSE data: lines
-        (when (string-prefix-p "data: " line)
-          (let ((json-str (substring line 6)))
-            (unless (string= json-str "[DONE]")
-              (condition-case nil
-                  (let* ((result (gpt-backend-parse-stream-chunk
-                                  backend json-str gpt-http--stream-state))
-                         (content (plist-get result :content))
-                         (thinking (plist-get result :thinking)))
-                    (setq gpt-http--stream-state (plist-get result :state))
-                    (when (or content thinking)
-                      (funcall on-data content thinking)))
-                (error nil)))))))
+        ;; Skip HTTP status line at end
+        (unless (string-prefix-p "__HTTP_STATUS__" line)
+          ;; Handle SSE data: lines
+          (when (string-prefix-p "data: " line)
+            (let ((json-str (substring line 6)))
+              (unless (string= json-str "[DONE]")
+                (condition-case nil
+                    (let* ((result (gpt-backend-parse-stream-chunk
+                                    backend json-str gpt-http--stream-state))
+                           (content (plist-get result :content))
+                           (thinking (plist-get result :thinking)))
+                      (setq gpt-http--stream-state (plist-get result :state))
+                      (when (or content thinking)
+                        (funcall on-data content thinking)))
+                  (error nil))))))))
     ;; Keep unprocessed data
     (setq gpt-http--stream-buffer (substring data pos))))
 
@@ -214,7 +304,14 @@ ON-DATA is called with (CONTENT THINKING) for each parsed chunk."
     (with-current-buffer buffer
       (when (and gpt-http--curl-process
                  (process-live-p gpt-http--curl-process))
-        (delete-process gpt-http--curl-process)))))
+        ;; Send SIGTERM first for clean shutdown
+        (interrupt-process gpt-http--curl-process)
+        ;; Give it a moment, then force kill if needed
+        (run-at-time 0.5 nil
+                     (lambda (proc)
+                       (when (process-live-p proc)
+                         (delete-process proc)))
+                     gpt-http--curl-process)))))
 
 (provide 'gpt-http)
 ;;; gpt-http.el ends here
