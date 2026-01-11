@@ -11,3 +11,4 @@ repomix*
 # Emacs
 *.elc
 .emacs-packages/
+.claude/
