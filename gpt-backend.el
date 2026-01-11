@@ -1,4 +1,4 @@
-;;; gpt-backend.el --- Backend definitions for gpt.el -*- lexical-binding: t; -*-
+;;; gpt-backend.el --- Backend definitions for gpt.el -*- lexical-binding: t; package-lint-main-file: "gpt.el"; -*-
 
 ;; Copyright (C) 2022-2025 Andreas Stuhlmueller
 
@@ -109,7 +109,6 @@ Recognizes User:/Assistant: and Human:/Model: prefixes."
       (insert text)
       (goto-char (point-min))
       (let ((current-role nil)
-            (current-content nil)
             (content-start nil))
         ;; Find all role markers
         (while (not (eobp))

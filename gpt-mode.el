@@ -1,4 +1,4 @@
-;;; gpt-mode.el --- Mode-specific functionality for gpt.el -*- lexical-binding: t; -*-
+;;; gpt-mode.el --- Mode-specific functionality for gpt.el -*- lexical-binding: t; package-lint-main-file: "gpt.el"; -*-
 
 ;; Copyright (C) 2022-2025 Andreas Stuhlmueller
 
@@ -8,7 +8,6 @@
 ;; URL: https://github.com/stuhlmueller/gpt.el
 ;; License: MIT
 ;; SPDX-License-Identifier: MIT
-;; Package-Requires: ((emacs "28.1"))
 
 ;;; Commentary:
 
@@ -28,6 +27,14 @@
 (declare-function gpt-create-output-buffer "gpt-ui" (command))
 (declare-function gpt-read-command "gpt-ui" (context-mode use-selection))
 (declare-function gpt-abort-request "gpt-api" (&optional buffer))
+(declare-function gpt-google--build-url "gpt-google" (backend model &optional stream))
+
+(defcustom gpt-enable-word-wrap t
+  "Whether to enable word wrapping in GPT buffers.
+When non-nil, long lines are wrapped at word boundaries.
+When nil, long lines are truncated (not wrapped)."
+  :type 'boolean
+  :group 'gpt)
 
 (defface gpt-input-face
   '((t (:inherit comint-highlight-prompt)))
@@ -371,13 +378,6 @@ integrates with markdown-mode if available."
 (defcustom gpt-mode-line-spinner-interval 0.1
   "Interval (seconds) between spinner frame updates."
   :type 'number
-  :group 'gpt)
-
-(defcustom gpt-enable-word-wrap t
-  "Whether to enable word wrapping in GPT buffers.
-When non-nil, long lines are wrapped at word boundaries.
-When nil, long lines are truncated (not wrapped)."
-  :type 'boolean
   :group 'gpt)
 
 (defvar gpt--spinner-frames ["◐" "◓" "◑" "◒"]

@@ -141,16 +141,16 @@ Appends streaming output to the buffer."
                       options))
            ;; Build request
            (request-data (gpt-backend-stream-request-data
-                          (or gpt-backend
-                              (setq gpt-backend (gpt-get-backend api-type)))
+                          (or gpt-current-backend
+                              (setq gpt-current-backend (gpt-get-backend api-type)))
                           messages options))
-           (headers (gpt-backend-headers gpt-backend))
+           (headers (gpt-backend-headers gpt-current-backend))
            (url (if (eq api-type 'google)
                     (progn
                       (require 'gpt-google)
-                      (gpt-google--build-url gpt-backend gpt-model t))
-                  (oref gpt-backend url))))
-      (unless gpt-backend
+                      (gpt-google--build-url gpt-current-backend gpt-model t))
+                  (oref gpt-current-backend url))))
+      (unless gpt-current-backend
         (user-error "Failed to create backend for %s" api-type))
       ;; Move to end of buffer for output
       (goto-char (point-max))
@@ -163,7 +163,7 @@ Appends streaming output to the buffer."
       (if (gpt-http--curl-available-p)
           (setq gpt--request-process
                 (gpt-http-stream-request
-                 url headers request-data gpt-backend
+                 url headers request-data gpt-current-backend
                  (lambda (content thinking)
                    (gpt--insert-stream-output buffer content thinking))
                  (lambda (success error-msg)
@@ -171,10 +171,10 @@ Appends streaming output to the buffer."
         ;; Fallback to non-streaming url-retrieve
         (gpt-http--url-request
          url headers request-data
-         (lambda (response http-status error-msg)
+         (lambda (response _http-status error-msg)
            (if error-msg
                (gpt--finalize-stream buffer nil error-msg)
-             (let ((content (gpt-backend-parse-response gpt-backend response)))
+             (let ((content (gpt-backend-parse-response gpt-current-backend response)))
                (if (stringp content)
                    (gpt--insert-stream-output buffer content nil)
                  ;; Handle response with thinking

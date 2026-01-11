@@ -19,6 +19,12 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'eieio)
+(require 'gpt-backend)
+
+;; Forward declarations for provider-specific create functions
+(declare-function gpt-openai-create "gpt-openai" (api-key))
+(declare-function gpt-anthropic-create "gpt-anthropic" (api-key &rest args))
+(declare-function gpt-google-create "gpt-google" (api-key))
 
 ;;; Customization group
 
@@ -29,7 +35,7 @@
 
 ;;; Backend management
 
-(defvar gpt-backend nil
+(defvar gpt-current-backend nil
   "The current backend instance for API calls.
 This is an object of type `gpt-backend' or its subclasses.")
 
@@ -40,11 +46,12 @@ Each entry is (PROVIDER . BACKEND-INSTANCE).")
 (defun gpt--backend-valid-p (backend provider)
   "Return t if BACKEND is a valid instance for PROVIDER."
   (and backend
-       (cl-typep backend 'gpt-backend)
+       (eieio-object-p backend)
+       (object-of-class-p backend 'gpt-backend)
        (pcase provider
-         ('openai (cl-typep backend 'gpt-openai-backend))
-         ('anthropic (cl-typep backend 'gpt-anthropic-backend))
-         ('google (cl-typep backend 'gpt-google-backend))
+         ('openai (object-of-class-p backend 'gpt-openai-backend))
+         ('anthropic (object-of-class-p backend 'gpt-anthropic-backend))
+         ('google (object-of-class-p backend 'gpt-google-backend))
          (_ nil))))
 
 (defun gpt-get-backend (provider)
@@ -86,7 +93,7 @@ Call this after changing API keys or backend settings."
   (let ((provider (gpt--current-api-type)))
     ;; Remove cached backend so it gets recreated
     (setf (alist-get provider gpt-backends) nil)
-    (setq gpt-backend (gpt-get-backend provider))))
+    (setq gpt-current-backend (gpt-get-backend provider))))
 
 ;;; Model definitions
 
@@ -133,7 +140,7 @@ Model names must match keys in `gpt-available-models'."
 
 (defcustom gpt-thinking-budget-fraction 3
   "Fraction of max_tokens to allocate for thinking budget.
-The thinking budget is calculated as (max_tokens / gpt-thinking-budget-fraction)."
+Thinking budget = max_tokens / this value."
   :type 'integer
   :group 'gpt)
 
@@ -154,7 +161,7 @@ Automatically set based on `gpt-thinking-budget-fraction'.")
     (setq gpt-thinking-budget thinking-budget)
     ;; Update backend for new API type (only after init complete)
     (when (and api-type (featurep 'gpt-core))
-      (setq gpt-backend (gpt-get-backend api-type)))))
+      (setq gpt-current-backend (gpt-get-backend api-type)))))
 
 (defun gpt--set-model (symbol value)
   "Set SYMBOL to VALUE and refresh derived settings."

@@ -660,15 +660,15 @@
   (let ((gpt-openai-key "initial-key")
         (gpt-model "gpt-5.2")  ; OpenAI model
         (gpt-backends nil)
-        (gpt-backend nil))
+        (gpt-current-backend nil))
     ;; Create initial backend
-    (setq gpt-backend (gpt-get-backend 'openai))
-    (should (equal (oref gpt-backend key) "initial-key"))
+    (setq gpt-current-backend (gpt-get-backend 'openai))
+    (should (equal (oref gpt-current-backend key) "initial-key"))
     ;; Change key and update
     (setq gpt-openai-key "new-key")
     (gpt-update-backend)
     ;; Should have new key
-    (should (equal (oref gpt-backend key) "new-key"))))
+    (should (equal (oref gpt-current-backend key) "new-key"))))
 
 (ert-deftest gpt-test-validate-api-key-missing ()
   "Test API key validation with missing key."

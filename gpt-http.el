@@ -1,4 +1,4 @@
-;;; gpt-http.el --- HTTP request layer for gpt.el -*- lexical-binding: t; -*-
+;;; gpt-http.el --- HTTP request layer for gpt.el -*- lexical-binding: t; package-lint-main-file: "gpt.el"; -*-
 
 ;; Copyright (C) 2022-2025 Andreas Stuhlmueller
 
